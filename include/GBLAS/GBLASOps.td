@@ -2,32 +2,42 @@
 #define GBLAS_OPS
 
 include "GBLAS/GBLASDialect.td"
+
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 class GBLAS_Op<string mnemonic, list<Trait> traits = []> :
     Op<GBLAS_Dialect, mnemonic, traits>;
 
-// Milestone 1: The unified multiply operation
-def GBLAS_MultiplyOp : GBLAS_Op<"multiply", [Pure]> {
-  let summary = "GraphBLAS generalized multiply operation";
-  let description = [{
-    A generalized multiply operation that handles matrix-matrix, 
-    matrix-vector, and vector-matrix multiplications using specific 
-    reduce and combine semiring operators.
-  }];
-
+// 1. Build Operation (from_coo)
+def GBLAS_FromCooOp : GBLAS_Op<"from_coo", [Pure]> {
+  let summary = "Builds a GraphBLAS matrix from COO (Coordinate) format";
   let arguments = (ins
-    AnyTensor:$lhs,
-    AnyTensor:$rhs,
+    AnyTensor:$rows,
+    AnyTensor:$cols,
+    AnyTensor:$vals
+  );
+  let results = (outs AnyTensor:$result);
+
+  let assemblyFormat = [{
+    $rows `,` $cols `,` $vals attr-dict `:` type($rows) `,` type($cols) `,` type($vals) `->` type($result)
+  }];
+}
+def GBLAS_MxmOp : GBLAS_Op<"mxm", [Pure]> {
+  let summary = "GraphBLAS matrix-matrix multiply";
+  let description = [{
+    Performs a matrix-matrix multiplication using the specified semiring.
+    Both inputs must be 2D tensors.
+  }];
+  let arguments = (ins
+    AnyTensor:$a,
+    AnyTensor:$b,
     GBLAS_BinaryOp:$combine_op,
     GBLAS_BinaryOp:$reduce_op
   );
-
   let results = (outs AnyTensor:$result);
 
-  // Declarative assembly format for a clean MLIR syntax
   let assemblyFormat = [{
-    $lhs `,` $rhs `combine` `=` $combine_op `reduce` `=` $reduce_op attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)
+    $a `,` $b `combine` `=` $combine_op `reduce` `=` $reduce_op attr-dict `:` type($a) `,` type($b) `->` type($result)
   }];
 }
 

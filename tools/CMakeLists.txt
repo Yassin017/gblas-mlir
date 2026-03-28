@@ -1,3 +1,5 @@
+
+
 set(LLVM_LINK_COMPONENTS Support)
 
 add_llvm_executable(gblas-opt
@@ -15,5 +17,10 @@ target_link_libraries(gblas-opt PRIVATE
   MLIRTensorDialect
   MLIRLinalgDialect
   MLIRArithDialect
-  MLIRSCFDialect
+  MLIRSCFDialect    
+  MLIRSparseTensorDialect   # for sparse encoding
+
+  MLIRSparseTensorTransforms
+  MLIRSparseTensorPipelines
+
 )

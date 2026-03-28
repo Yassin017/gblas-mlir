@@ -1,5 +1,6 @@
 add_mlir_dialect_library(GBLASDialect
   GBLAS/GBLASDialect.cpp
+  GBLAS/GBLASToLinalg.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${PROJECT_SOURCE_DIR}/include/GBLAS
@@ -11,4 +12,11 @@ add_mlir_dialect_library(GBLASDialect
   MLIRIR
   MLIRInferTypeOpInterface
   MLIRSideEffectInterfaces
+  MLIRLinalgDialect
+  MLIRTensorDialect
+  MLIRArithDialect
+  MLIRSCFDialect
+  MLIRSparseTensorDialect
+  MLIRTransforms
+  MLIRParser    
 )
