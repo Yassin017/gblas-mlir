@@ -41,4 +41,24 @@ def GBLAS_MxmOp : GBLAS_Op<"mxm", [Pure]> {
   }];
 }
 
+def GBLAS_EWiseAddOp : GBLAS_Op<"ewise_add"> {
+    let summary = "GraphBLAS element-wise addition (union)";
+    let description = [{
+        Returns a tensor containing the union of the indices of the input tensors.
+        If an index exists in both, the `apply` operator is used to combine them.
+    }];
+
+    let arguments = (ins 
+        AnyTensor:$lhs, 
+        AnyTensor:$rhs,
+        StrAttr:$op_name // e.g., "plus"
+    );
+
+    let results = (outs AnyTensor:$result);
+
+    let hasVerifier = 1;
+
+    let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
+}
+
 #endif // GBLAS_OPS

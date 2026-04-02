@@ -10,6 +10,8 @@
 
 #include "mlir/AsmParser/AsmParser.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+
 
 // -- Generate Pass Implementation 
 namespace mlir {
@@ -110,6 +112,31 @@ struct MxmOpLowering : public OpRewritePattern<gblas::MxmOp> {
   }
 };
 
+struct EWiseAddLowering : public OpConversionPattern<gblas::EWiseAddOp> {
+  using OpConversionPattern<gblas::EWiseAddOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(gblas::EWiseAddOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    
+    auto loc = op.getLoc();
+    auto resultType = llvm::cast<RankedTensorType>(op.getResult().getType());
+
+    // Fix: Use bufferization::AllocTensorOp instead of sparse_tensor::AllocOp
+    auto allocOp = rewriter.create<bufferization::AllocTensorOp>(
+        loc, resultType, ValueRange{}, Value(), IntegerAttr());
+
+    // Replace with linalg.add
+    rewriter.replaceOpWithNewOp<linalg::AddOp>(
+        op, 
+        resultType, 
+        ValueRange{adaptor.getLhs(), adaptor.getRhs()}, 
+        ValueRange{allocOp.getResult()});
+
+    return success();
+  }
+};
+
 struct ConvertGBLASToLinalgPass 
     : public gblas::impl::ConvertGBLASToLinalgBase<ConvertGBLASToLinalgPass> {
   void runOnOperation() override {
@@ -118,6 +145,9 @@ struct ConvertGBLASToLinalgPass
     target.addLegalDialect<linalg::LinalgDialect, tensor::TensorDialect, 
                            arith::ArithDialect, scf::SCFDialect>();
 
+    target.addLegalDialect<bufferization::BufferizationDialect>();
+    target.addLegalOp<bufferization::AllocTensorOp>();
+
     target.addLegalDialect<
       linalg::LinalgDialect,
       scf::SCFDialect,
@@ -125,8 +155,10 @@ struct ConvertGBLASToLinalgPass
       arith::ArithDialect,
       sparse_tensor::SparseTensorDialect>();
 
+    target.addIllegalOp<gblas::EWiseAddOp>();
+
     RewritePatternSet patterns(&getContext());
-    patterns.add<FromCooOpLowering, MxmOpLowering>(&getContext());
+    patterns.add<FromCooOpLowering, MxmOpLowering, EWiseAddLowering>(&getContext());
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns)))) {
       signalPassFailure();
@@ -143,3 +175,34 @@ std::unique_ptr<Pass> createConvertGBLASToLinalgPass() {
 }
 } // namespace gblas
 } // namespace mlir 
+
+
+
+// struct MxmOpLowering : public OpRewritePattern<gblas::MxmOp> {
+//   using OpRewritePattern<gblas::MxmOp>::OpRewritePattern;
+
+//   LogicalResult matchAndRewrite(gblas::MxmOp op, PatternRewriter &rewriter) const override {
+//     Location loc = op.getLoc();
+//     auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+//     if (!resultType) return failure();
+
+//     // Use the same consistent allocator you used in EWiseAdd
+//     auto allocOp = rewriter.create<bufferization::AllocTensorOp>(
+//         loc, resultType, ValueRange{}, Value(), IntegerAttr());
+
+//     // Create a zero constant for filling
+//     Value zero = rewriter.create<arith::ConstantOp>(
+//         loc, rewriter.getZeroAttr(resultType.getElementType()));
+
+//     // Use linalg.fill on the allocated tensor
+//     Value filledTensor = rewriter.create<linalg::FillOp>(
+//         loc, ValueRange{zero}, ValueRange{allocOp}).getResult(0);
+
+//     // Now create the Matmul
+//     // Note: Use replaceOpWithNewOp to be cleaner
+//     rewriter.replaceOpWithNewOp<linalg::MatmulOp>(
+//         op, resultType, ValueRange{op.getA(), op.getB()}, ValueRange{filledTensor});
+
+//     return success();
+//   }
+// };
