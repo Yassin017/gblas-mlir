@@ -1,3 +1,5 @@
+// ./tools/gblas-opt ../test/test_ewise.mlir --convert-gblas-to-linalg --linalg-generalize-named-ops --sparsification-and-bufferization
+
 // 1. Define Encodings
 #COO = #sparse_tensor.encoding<{ 
   map = (d0, d1) -> (d0 : compressed, d1 : singleton) 

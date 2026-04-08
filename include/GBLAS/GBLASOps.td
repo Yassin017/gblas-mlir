@@ -61,4 +61,26 @@ def GBLAS_EWiseAddOp : GBLAS_Op<"ewise_add"> {
     let assemblyFormat = "$lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)";
 }
 
+def GBLAS_NRowsOp : GBLAS_Op<"nrows", [Pure]> {
+    let summary = "Returns the number of rows.";
+    let arguments = (ins AnyTensor:$input);
+    let results = (outs Index:$res);
+    
+    // Manual flag to enable folding in C++
+    let hasFolder = 1;
+    
+    let assemblyFormat = "$input attr-dict `:` type($input) `->` type($res)";
+}
+
+def GBLAS_NColsOp : GBLAS_Op<"ncols", [Pure]> {
+    let summary = "Returns the number of columns.";
+    let arguments = (ins AnyTensor:$input);
+    let results = (outs Index:$res);
+    
+    // Manual flag to enable folding in C++
+    let hasFolder = 1;
+    
+    let assemblyFormat = "$input attr-dict `:` type($input) `->` type($res)";
+}
+
 #endif // GBLAS_OPS

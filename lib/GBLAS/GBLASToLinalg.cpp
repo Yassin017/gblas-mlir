@@ -137,6 +137,78 @@ struct EWiseAddLowering : public OpConversionPattern<gblas::EWiseAddOp> {
   }
 };
 
+struct NRowsLowering : public OpConversionPattern<gblas::NRowsOp> {
+  using OpConversionPattern<gblas::NRowsOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(gblas::NRowsOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Value input = adaptor.getInput();
+    Type type = input.getType();
+
+    // 1. Existing Ranked Logic
+    if (auto rankedType = llvm::dyn_cast<RankedTensorType>(type)) {
+      Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      rewriter.replaceOpWithNewOp<tensor::DimOp>(op, input, zero);
+      return success();
+    }
+
+    // 2. NEW Unranked Logic
+    if (auto unrankedType = llvm::dyn_cast<UnrankedTensorType>(type)) {
+      Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      Value rank = rewriter.create<tensor::RankOp>(loc, input);
+      
+      // Check: is rank > 0?
+      Value isValid = rewriter.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::ugt, rank, zero);
+
+      Value dimSize = rewriter.create<tensor::DimOp>(loc, input, zero);
+      
+      // If valid, return dim, else return 0
+      rewriter.replaceOpWithNewOp<arith::SelectOp>(op, isValid, dimSize, zero);
+      return success();
+    }
+    return failure();
+  }
+};
+
+// --- Updated Pattern for NColsOp ---
+struct NColsLowering : public OpConversionPattern<gblas::NColsOp> {
+  using OpConversionPattern<gblas::NColsOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(gblas::NColsOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Value input = adaptor.getInput();
+    Type type = input.getType();
+
+    if (auto rankedType = llvm::dyn_cast<RankedTensorType>(type)) {
+      // Safety: Only lower if rank is actually >= 2
+      if (rankedType.getRank() < 2) return failure();
+      Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      rewriter.replaceOpWithNewOp<tensor::DimOp>(op, input, one);
+      return success();
+    }
+
+    if (auto unrankedType = llvm::dyn_cast<UnrankedTensorType>(type)) {
+      Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      Value rank = rewriter.create<tensor::RankOp>(loc, input);
+
+      // Check: is rank > 1?
+      Value isValid = rewriter.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::ugt, rank, one);
+
+      Value dimSize = rewriter.create<tensor::DimOp>(loc, input, one);
+      
+      rewriter.replaceOpWithNewOp<arith::SelectOp>(op, isValid, dimSize, zero);
+      return success();
+    }
+    return failure();
+  }
+};
+
+
 struct ConvertGBLASToLinalgPass 
     : public gblas::impl::ConvertGBLASToLinalgBase<ConvertGBLASToLinalgPass> {
   void runOnOperation() override {
@@ -158,7 +230,7 @@ struct ConvertGBLASToLinalgPass
     target.addIllegalOp<gblas::EWiseAddOp>();
 
     RewritePatternSet patterns(&getContext());
-    patterns.add<FromCooOpLowering, MxmOpLowering, EWiseAddLowering>(&getContext());
+    patterns.add<FromCooOpLowering, MxmOpLowering, EWiseAddLowering, NRowsLowering, NColsLowering>(&getContext());
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns)))) {
       signalPassFailure();
