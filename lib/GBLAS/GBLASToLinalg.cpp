@@ -10,6 +10,8 @@
 
 #include "mlir/AsmParser/AsmParser.h"
 
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+
 
 // -- Generate Pass Implementation 
 namespace mlir {
@@ -346,6 +348,103 @@ struct VxvOpLowering : public OpRewritePattern<gblas::VxvOp> {
   }
 };
 
+struct EWiseAddLowering : public OpConversionPattern<gblas::EWiseAddOp> {
+  using OpConversionPattern<gblas::EWiseAddOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(gblas::EWiseAddOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    
+    auto loc = op.getLoc();
+    auto resultType = llvm::cast<RankedTensorType>(op.getResult().getType());
+
+    // Fix: Use bufferization::AllocTensorOp instead of sparse_tensor::AllocOp
+    auto allocOp = rewriter.create<bufferization::AllocTensorOp>(
+        loc, resultType, ValueRange{}, Value(), IntegerAttr());
+
+    // Replace with linalg.add
+    rewriter.replaceOpWithNewOp<linalg::AddOp>(
+        op, 
+        resultType, 
+        ValueRange{adaptor.getLhs(), adaptor.getRhs()}, 
+        ValueRange{allocOp.getResult()});
+
+    return success();
+  }
+};
+
+struct NRowsLowering : public OpConversionPattern<gblas::NRowsOp> {
+  using OpConversionPattern<gblas::NRowsOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(gblas::NRowsOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Value input = adaptor.getInput();
+    Type type = input.getType();
+
+    // 1. Existing Ranked Logic
+    if (auto rankedType = llvm::dyn_cast<RankedTensorType>(type)) {
+      Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      rewriter.replaceOpWithNewOp<tensor::DimOp>(op, input, zero);
+      return success();
+    }
+
+    // 2. NEW Unranked Logic
+    if (auto unrankedType = llvm::dyn_cast<UnrankedTensorType>(type)) {
+      Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      Value rank = rewriter.create<tensor::RankOp>(loc, input);
+      
+      // Check: is rank > 0?
+      Value isValid = rewriter.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::ugt, rank, zero);
+
+      Value dimSize = rewriter.create<tensor::DimOp>(loc, input, zero);
+      
+      // If valid, return dim, else return 0
+      rewriter.replaceOpWithNewOp<arith::SelectOp>(op, isValid, dimSize, zero);
+      return success();
+    }
+    return failure();
+  }
+};
+
+// --- Updated Pattern for NColsOp ---
+struct NColsLowering : public OpConversionPattern<gblas::NColsOp> {
+  using OpConversionPattern<gblas::NColsOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(gblas::NColsOp op, OpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Value input = adaptor.getInput();
+    Type type = input.getType();
+
+    if (auto rankedType = llvm::dyn_cast<RankedTensorType>(type)) {
+      // Safety: Only lower if rank is actually >= 2
+      if (rankedType.getRank() < 2) return failure();
+      Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      rewriter.replaceOpWithNewOp<tensor::DimOp>(op, input, one);
+      return success();
+    }
+
+    if (auto unrankedType = llvm::dyn_cast<UnrankedTensorType>(type)) {
+      Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+      Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+      Value rank = rewriter.create<tensor::RankOp>(loc, input);
+
+      // Check: is rank > 1?
+      Value isValid = rewriter.create<arith::CmpIOp>(
+          loc, arith::CmpIPredicate::ugt, rank, one);
+
+      Value dimSize = rewriter.create<tensor::DimOp>(loc, input, one);
+      
+      rewriter.replaceOpWithNewOp<arith::SelectOp>(op, isValid, dimSize, zero);
+      return success();
+    }
+    return failure();
+  }
+};
+
+
 struct ConvertGBLASToLinalgPass 
     : public gblas::impl::ConvertGBLASToLinalgBase<ConvertGBLASToLinalgPass> {
   void runOnOperation() override {
@@ -354,6 +453,9 @@ struct ConvertGBLASToLinalgPass
     target.addLegalDialect<linalg::LinalgDialect, tensor::TensorDialect, 
                            arith::ArithDialect, scf::SCFDialect>();
 
+    target.addLegalDialect<bufferization::BufferizationDialect>();
+    target.addLegalOp<bufferization::AllocTensorOp>();
+
     target.addLegalDialect<
       linalg::LinalgDialect,
       scf::SCFDialect,
@@ -361,12 +463,18 @@ struct ConvertGBLASToLinalgPass
       arith::ArithDialect,
       sparse_tensor::SparseTensorDialect>();
 
+    target.addIllegalOp<gblas::EWiseAddOp>();
+
     RewritePatternSet patterns(&getContext());
+
     patterns.add<FromCooOpLowering, 
                  MxmOpLowering, 
                  MxvOpLowering, 
                  VxmOpLowering, 
-                 VxvOpLowering>(&getContext());
+                 VxvOpLowering,
+                 EWiseAddLowering,
+                 NRowsLowering,
+                 NColsLowering>(&getContext());
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns)))) {
       signalPassFailure();
@@ -383,3 +491,34 @@ std::unique_ptr<Pass> createConvertGBLASToLinalgPass() {
 }
 } // namespace gblas
 } // namespace mlir 
+
+
+
+// struct MxmOpLowering : public OpRewritePattern<gblas::MxmOp> {
+//   using OpRewritePattern<gblas::MxmOp>::OpRewritePattern;
+
+//   LogicalResult matchAndRewrite(gblas::MxmOp op, PatternRewriter &rewriter) const override {
+//     Location loc = op.getLoc();
+//     auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+//     if (!resultType) return failure();
+
+//     // Use the same consistent allocator you used in EWiseAdd
+//     auto allocOp = rewriter.create<bufferization::AllocTensorOp>(
+//         loc, resultType, ValueRange{}, Value(), IntegerAttr());
+
+//     // Create a zero constant for filling
+//     Value zero = rewriter.create<arith::ConstantOp>(
+//         loc, rewriter.getZeroAttr(resultType.getElementType()));
+
+//     // Use linalg.fill on the allocated tensor
+//     Value filledTensor = rewriter.create<linalg::FillOp>(
+//         loc, ValueRange{zero}, ValueRange{allocOp}).getResult(0);
+
+//     // Now create the Matmul
+//     // Note: Use replaceOpWithNewOp to be cleaner
+//     rewriter.replaceOpWithNewOp<linalg::MatmulOp>(
+//         op, resultType, ValueRange{op.getA(), op.getB()}, ValueRange{filledTensor});
+
+//     return success();
+//   }
+// };

@@ -7,6 +7,7 @@ include "mlir/IR/EnumAttr.td"
 def GBLAS_Dialect : Dialect {
   let name = "gblas";
   let cppNamespace = "::mlir::gblas";
+  let hasConstantMaterializer = 1;
   let summary = "GraphBLAS MLIR Dialect (mlir-graphblas API)";
 }
 
