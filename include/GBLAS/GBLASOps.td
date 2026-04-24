@@ -9,11 +9,19 @@ class GBLAS_Op<string mnemonic, list<Trait> traits = []> :
 
 // 1. Build Operation (from_coo)
 def GBLAS_FromCooOp : GBLAS_Op<"from_coo", [Pure]> {
-  let summary = "Builds a GraphBLAS matrix from COO format";
-  let arguments = (ins AnyTensor:$rows, AnyTensor:$cols, AnyTensor:$vals);
+  let summary = "Builds a GraphBLAS tensor from coordinate tensors";
+  let description = [{
+    Builds a new sparse tensor using a 2D dense tensor representing the
+    indices as coordinates and a 1D tensor of associated values.
+    Returns either a 1D vector or a 2D matrix based on the output type.
+  }];
+  let arguments = (ins 
+    2DTensorOf<[AnyInteger]>:$indices, 
+    1DTensorOf<[AnyType]>:$values
+  );
   let results = (outs AnyTensor:$result);
   let assemblyFormat = [{
-    $rows `,` $cols `,` $vals attr-dict `:` type($rows) `,` type($cols) `,` type($vals) `->` type($result)
+    $indices `,` $values attr-dict `:` type($indices) `,` type($values) `->` type($result)
   }];
 }
 

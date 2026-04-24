@@ -26,6 +26,7 @@ using namespace mlir;
 
 namespace {
 
+/** 
 //  Lowering for gblas.from_coo 
 struct FromCooOpLowering : public OpRewritePattern<gblas::FromCooOp> {
   using OpRewritePattern<gblas::FromCooOp>::OpRewritePattern;
@@ -88,6 +89,190 @@ struct FromCooOpLowering : public OpRewritePattern<gblas::FromCooOp> {
   }
 
 };
+
+**/
+
+/** 
+// ============================================================================
+// Lowering for gblas.from_coo
+// ============================================================================
+struct FromCooOpLowering : public OpRewritePattern<gblas::FromCooOp> {
+  using OpRewritePattern<gblas::FromCooOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(gblas::FromCooOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    int rank = resultType.getRank();
+    
+    // We only support generating 1D vectors or 2D matrices
+    if (rank != 1 && rank != 2) return failure();
+
+    // 1. Allocate and fill the output tensor with 0.0
+    Value emptyTensor = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    Value zero = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(resultType.getElementType()));
+    Value filledTensor = rewriter.create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{emptyTensor}).getResult(0);
+
+    // 2. Prepare loop bounds (0 to length of values array)
+    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value length = rewriter.create<tensor::DimOp>(loc, op.getValues(), 0);
+
+    // 3. scf.for loop to insert values into the dense tensor
+    auto forOp = rewriter.create<scf::ForOp>(
+        loc, c0, length, c1, ValueRange{filledTensor},
+        [&](OpBuilder &b, Location loc, Value iv, ValueRange iterArgs) {
+            // Extract the value
+            Value val = b.create<tensor::ExtractOp>(loc, op.getValues(), ValueRange{iv});
+            
+            Value updatedTensor;
+            if (rank == 1) {
+                // Vector: Extract idx from indices[iv, 0]
+                Value idxRaw = b.create<tensor::ExtractOp>(loc, op.getIndices(), ValueRange{iv, c0});
+                Value idx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), idxRaw);
+                updatedTensor = b.create<tensor::InsertOp>(loc, val, iterArgs[0], ValueRange{idx});
+            } else {
+                // Matrix: Extract row from indices[iv, 0], col from indices[iv, 1]
+                Value rowRaw = b.create<tensor::ExtractOp>(loc, op.getIndices(), ValueRange{iv, c0});
+                Value colRaw = b.create<tensor::ExtractOp>(loc, op.getIndices(), ValueRange{iv, c1});
+                Value row = b.create<arith::IndexCastOp>(loc, b.getIndexType(), rowRaw);
+                Value col = b.create<arith::IndexCastOp>(loc, b.getIndexType(), colRaw);
+                updatedTensor = b.create<tensor::InsertOp>(loc, val, iterArgs[0], ValueRange{row, col});
+            }
+            b.create<scf::YieldOp>(loc, updatedTensor);
+        });
+
+    rewriter.replaceOp(op, forOp.getResult(0));
+    return success();
+  }
+};
+
+**/
+
+/**
+
+struct FromCooOpLowering : public OpRewritePattern<gblas::FromCooOp> {
+  using OpRewritePattern<gblas::FromCooOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(gblas::FromCooOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    int rank = resultType.getRank();
+    
+    if (rank != 1 && rank != 2) return failure();
+
+    // 1. Check if the output is meant to be sparse
+    bool isSparse = sparse_tensor::getSparseTensorEncoding(resultType) != nullptr;
+
+    // 2. Initialize the tensor
+    Value emptyTensor = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
+    Value initTensor = emptyTensor;
+
+    if (!isSparse) {
+        // Only dense tensors need explicit filling
+        Value zero = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(resultType.getElementType()));
+        initTensor = rewriter.create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{emptyTensor}).getResult(0);
+    }
+
+    // 3. Prepare loop bounds
+    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value length = rewriter.create<tensor::DimOp>(loc, op.getValues(), 0);
+
+    // 4. scf.for loop to insert values
+    auto forOp = rewriter.create<scf::ForOp>(
+        loc, c0, length, c1, ValueRange{initTensor},
+        [&](OpBuilder &b, Location loc, Value iv, ValueRange iterArgs) {
+            Value val = b.create<tensor::ExtractOp>(loc, op.getValues(), ValueRange{iv});
+            Value updatedTensor;
+            if (rank == 1) {
+                Value idxRaw = b.create<tensor::ExtractOp>(loc, op.getIndices(), ValueRange{iv, c0});
+                Value idx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), idxRaw);
+                updatedTensor = b.create<tensor::InsertOp>(loc, val, iterArgs[0], ValueRange{idx});
+            } else {
+                Value rowRaw = b.create<tensor::ExtractOp>(loc, op.getIndices(), ValueRange{iv, c0});
+                Value colRaw = b.create<tensor::ExtractOp>(loc, op.getIndices(), ValueRange{iv, c1});
+                Value row = b.create<arith::IndexCastOp>(loc, b.getIndexType(), rowRaw);
+                Value col = b.create<arith::IndexCastOp>(loc, b.getIndexType(), colRaw);
+                updatedTensor = b.create<tensor::InsertOp>(loc, val, iterArgs[0], ValueRange{row, col});
+            }
+            b.create<scf::YieldOp>(loc, updatedTensor);
+        });
+
+    Value finalResult = forOp.getResult(0);
+
+   // 5. If Sparse, we must finalize the inserts to compress the data structure
+    if (isSparse) {
+        finalResult = rewriter.create<sparse_tensor::LoadOp>(loc, finalResult, rewriter.getUnitAttr());
+    }
+
+    rewriter.replaceOp(op, finalResult);
+    return success();
+  }
+};
+
+**/
+
+// ============================================================================
+// Lowering for gblas.from_coo (Modern Sparse-Compatible)
+// ============================================================================
+struct FromCooOpLowering : public OpRewritePattern<gblas::FromCooOp> {
+  using OpRewritePattern<gblas::FromCooOp>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(gblas::FromCooOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    int rank = resultType.getRank();
+    
+    if (rank != 1 && rank != 2) return failure();
+
+    // 1. Determine if the requested output is sparse
+    bool isSparse = sparse_tensor::getSparseTensorEncoding(resultType) != nullptr;
+
+    // 2. Always create a DENSE equivalent type first as our assembly workspace
+    auto denseType = RankedTensorType::get(resultType.getShape(), resultType.getElementType());
+    Value emptyTensor = rewriter.create<tensor::EmptyOp>(loc, denseType.getShape(), denseType.getElementType());
+    Value zero = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(denseType.getElementType()));
+    Value initTensor = rewriter.create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{emptyTensor}).getResult(0);
+
+    // 3. Prepare loop bounds
+    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value length = rewriter.create<tensor::DimOp>(loc, op.getValues(), 0);
+
+    // 4. scf.for loop to insert values into the DENSE workspace
+    auto forOp = rewriter.create<scf::ForOp>(
+        loc, c0, length, c1, ValueRange{initTensor},
+        [&](OpBuilder &b, Location loc, Value iv, ValueRange iterArgs) {
+            Value val = b.create<tensor::ExtractOp>(loc, op.getValues(), ValueRange{iv});
+            Value updatedTensor;
+            if (rank == 1) {
+                Value idxRaw = b.create<tensor::ExtractOp>(loc, op.getIndices(), ValueRange{iv, c0});
+                Value idx = b.create<arith::IndexCastOp>(loc, b.getIndexType(), idxRaw);
+                updatedTensor = b.create<tensor::InsertOp>(loc, val, iterArgs[0], ValueRange{idx});
+            } else {
+                Value rowRaw = b.create<tensor::ExtractOp>(loc, op.getIndices(), ValueRange{iv, c0});
+                Value colRaw = b.create<tensor::ExtractOp>(loc, op.getIndices(), ValueRange{iv, c1});
+                Value row = b.create<arith::IndexCastOp>(loc, b.getIndexType(), rowRaw);
+                Value col = b.create<arith::IndexCastOp>(loc, b.getIndexType(), colRaw);
+                updatedTensor = b.create<tensor::InsertOp>(loc, val, iterArgs[0], ValueRange{row, col});
+            }
+            b.create<scf::YieldOp>(loc, updatedTensor);
+        });
+
+    Value finalResult = forOp.getResult(0);
+
+    // 5. THE MAGIC STEP: Convert the dense workspace to the requested Sparse Tensor.
+    // This triggers the MLIR Sparse Compiler to natively run the exact algorithm 
+    // you found in graphblas-mlir (Count, CumSum, Scatter) highly optimized in C.
+    if (isSparse) {
+        finalResult = rewriter.create<sparse_tensor::ConvertOp>(loc, resultType, finalResult);
+    }
+
+    rewriter.replaceOp(op, finalResult);
+    return success();
+  }
+};
+
 
 
 // // Lowering for gblas.mxm 
@@ -155,148 +340,61 @@ static Value buildSemiringOperation(OpBuilder &builder, Location loc, gblas::Bin
         default:                          return builder.create<arith::AddFOp>(loc, lhs, rhs);
     }
 }
-
-// Lowering for gblas.mxm using linalg::GenericOp (True Semiring Support)
-struct MxmOpLowering : public OpRewritePattern<gblas::MxmOp> {
-  using OpRewritePattern<gblas::MxmOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(gblas::MxmOp op, PatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    auto resultType = cast<RankedTensorType>(op.getResult().getType());
-
-    if (op.getMask()) return failure(); // TODO: Implement structural masking later
-
-    // 1. Create the empty output tensor and fill it with zeros
-    Value emptyTensor = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
-    Value zero = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(resultType.getElementType()));
-    Value filledTensor = rewriter.create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{emptyTensor}).getResult(0);
-
-    // 2. Define the Affine Maps for Matmul: A(m, k) * B(k, n) = C(m, n)
-    MLIRContext *context = rewriter.getContext();
-    AffineExpr m, n, k;
-    bindDims(context, m, n, k);
+// Common helper to get the initialized output tensor (Empty for Sparse, Zero-Filled for Dense)
+static Value getInitializedOutputTensor(PatternRewriter &rewriter, Location loc, RankedTensorType resultType) {
+    // 1. Create an empty tensor that perfectly preserves the type (including sparse encoding)
+    Value emptyTensor = rewriter.create<tensor::EmptyOp>(loc, resultType, ValueRange{});
     
-    SmallVector<AffineMap> indexingMaps = {
-        AffineMap::get(3, 0, {m, k}, context), // Map for A
-        AffineMap::get(3, 0, {k, n}, context), // Map for B
-        AffineMap::get(3, 0, {m, n}, context)  // Map for C (Output)
-    };
+    // 2. Check if it has a sparse encoding
+    if (sparse_tensor::getSparseTensorEncoding(resultType)) {
+        // Sparse tensors are intrinsically empty/zero-filled upon creation.
+        // We do NOT want to run linalg::FillOp on them.
+        return emptyTensor;
+    } else {
+        // Dense tensors allocate dirty memory, so we must explicitly fill with zeros.
+        Value zero = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(resultType.getElementType()));
+        return rewriter.create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{emptyTensor}).getResult(0);
+    }
+}
 
-    // 3. Define the iteration types (parallel, parallel, reduction)
-    SmallVector<utils::IteratorType> iteratorTypes = {
-        utils::IteratorType::parallel, 
-        utils::IteratorType::parallel, 
-        utils::IteratorType::reduction
-    };
+// ============================================================================
+// Updated Lowerings
+// ============================================================================
 
-    // 4. Create the GenericOp and inject the Semiring
-    auto genericOp = rewriter.create<linalg::GenericOp>(
-        loc, resultType, 
-        ValueRange{op.getA(), op.getB()}, // Inputs
-        ValueRange{filledTensor},         // Outputs
-        indexingMaps, iteratorTypes,
-        [&](OpBuilder &b, Location loc, ValueRange args) {
-            Value a = args[0], b_val = args[1], c = args[2];
-            
-            // Apply the Combine Operator (e.g., multiplies)
-            Value combined = buildSemiringOperation(b, loc, op.getCombineOp(), a, b_val);
-            
-            // Apply the Reduce Operator (e.g., plus)
-            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, c);
-            
-            b.create<linalg::YieldOp>(loc, reduced);
-        });
-
-    rewriter.replaceOp(op, genericOp.getResult(0));
-    return success();
-  }
-};
-
-// Lowering for gblas.mxv using linalg::GenericOp
-struct MxvOpLowering : public OpRewritePattern<gblas::MxvOp> {
-  using OpRewritePattern<gblas::MxvOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(gblas::MxvOp op, PatternRewriter &rewriter) const override {
-    Location loc = op.getLoc();
-    auto resultType = cast<RankedTensorType>(op.getResult().getType());
-
-    if (op.getMask()) return failure();
-
-    Value emptyTensor = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
-    Value zero = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(resultType.getElementType()));
-    Value filledTensor = rewriter.create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{emptyTensor}).getResult(0);
-
-    // Affine Maps for Matvec: Matrix(m, k) * Vector(k) = Output(m)
-    MLIRContext *context = rewriter.getContext();
-    AffineExpr m, k;
-    bindDims(context, m, k);
-    
-    SmallVector<AffineMap> indexingMaps = {
-        AffineMap::get(2, 0, {m, k}, context), // Matrix
-        AffineMap::get(2, 0, {k}, context),    // Vector
-        AffineMap::get(2, 0, {m}, context)     // Output
-    };
-
-    SmallVector<utils::IteratorType> iteratorTypes = {
-        utils::IteratorType::parallel, 
-        utils::IteratorType::reduction
-    };
-
-    auto genericOp = rewriter.create<linalg::GenericOp>(
-        loc, resultType, 
-        ValueRange{op.getMatrix(), op.getVector()}, 
-        ValueRange{filledTensor},
-        indexingMaps, iteratorTypes,
-        [&](OpBuilder &b, Location loc, ValueRange args) {
-            Value combined = buildSemiringOperation(b, loc, op.getCombineOp(), args[0], args[1]);
-            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, args[2]);
-            b.create<linalg::YieldOp>(loc, reduced);
-        });
-
-    rewriter.replaceOp(op, genericOp.getResult(0));
-    return success();
-  }
-};
-
-// Lowering for gblas.vxm using linalg::GenericOp
 struct VxmOpLowering : public OpRewritePattern<gblas::VxmOp> {
   using OpRewritePattern<gblas::VxmOp>::OpRewritePattern;
-
   LogicalResult matchAndRewrite(gblas::VxmOp op, PatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     auto resultType = cast<RankedTensorType>(op.getResult().getType());
 
-    if (op.getMask()) return failure(); // Reject mask for now
+    Value outTensor = getInitializedOutputTensor(rewriter, loc, resultType);
 
-    Value emptyTensor = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(), resultType.getElementType());
-    Value zero = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(resultType.getElementType()));
-    Value filledTensor = rewriter.create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{emptyTensor}).getResult(0);
-
-    // Affine Maps for Vector-Matrix: Vector(k) * Matrix(k, n) = Output(n)
     MLIRContext *context = rewriter.getContext();
-    AffineExpr n, k;
-    bindDims(context, n, k);
-    
-    SmallVector<AffineMap> indexingMaps = {
-        AffineMap::get(2, 0, {k}, context),    // Vector
-        AffineMap::get(2, 0, {k, n}, context), // Matrix
-        AffineMap::get(2, 0, {n}, context)     // Output
-    };
+    AffineExpr n, k; bindDims(context, n, k);
 
-    SmallVector<utils::IteratorType> iteratorTypes = {
-        utils::IteratorType::parallel,  // n
-        utils::IteratorType::reduction  // k
-    };
+    SmallVector<Value> inputs = {op.getVector(), op.getMatrix()};
+    SmallVector<AffineMap> indexingMaps = { AffineMap::get(2, 0, {k}, context), AffineMap::get(2, 0, {k, n}, context) };
+
+    if (op.getMask()) {
+        inputs.push_back(op.getMask());
+        indexingMaps.push_back(AffineMap::get(2, 0, {n}, context));
+    }
+    indexingMaps.push_back(AffineMap::get(2, 0, {n}, context)); // Output mapping
+
+    SmallVector<utils::IteratorType> iteratorTypes = {utils::IteratorType::parallel, utils::IteratorType::reduction};
 
     auto genericOp = rewriter.create<linalg::GenericOp>(
-        loc, resultType, 
-        ValueRange{op.getVector(), op.getMatrix()}, 
-        ValueRange{filledTensor},
-        indexingMaps, iteratorTypes,
+        loc, resultType, inputs, ValueRange{outTensor}, indexingMaps, iteratorTypes,
         [&](OpBuilder &b, Location loc, ValueRange args) {
             Value combined = buildSemiringOperation(b, loc, op.getCombineOp(), args[0], args[1]);
-            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, args[2]);
-            b.create<linalg::YieldOp>(loc, reduced);
+            Value out_val = op.getMask() ? args[3] : args[2];
+            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, out_val);
+
+            if (op.getMask()) {
+                Value mask_cond = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UGT, args[2], b.create<arith::ConstantOp>(loc, b.getFloatAttr(b.getF32Type(), 0.0)));
+                if (op.getMaskComplement()) mask_cond = b.create<arith::XOrIOp>(loc, mask_cond, b.create<arith::ConstantIntOp>(loc, 1, 1));
+                b.create<linalg::YieldOp>(loc, b.create<arith::SelectOp>(loc, mask_cond, reduced, out_val).getResult());
+            } else { b.create<linalg::YieldOp>(loc, reduced); }
         });
 
     rewriter.replaceOp(op, genericOp.getResult(0));
@@ -304,45 +402,123 @@ struct VxmOpLowering : public OpRewritePattern<gblas::VxmOp> {
   }
 };
 
-// Lowering for gblas.vxv using linalg::GenericOp
+struct MxvOpLowering : public OpRewritePattern<gblas::MxvOp> {
+  using OpRewritePattern<gblas::MxvOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(gblas::MxvOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    
+    Value outTensor = getInitializedOutputTensor(rewriter, loc, resultType);
+
+    MLIRContext *context = rewriter.getContext();
+    AffineExpr m, k; bindDims(context, m, k);
+
+    SmallVector<Value> inputs = {op.getMatrix(), op.getVector()};
+    SmallVector<AffineMap> indexingMaps = {AffineMap::get(2, 0, {m, k}, context), AffineMap::get(2, 0, {k}, context)};
+    
+    if (op.getMask()) {
+        inputs.push_back(op.getMask());
+        indexingMaps.push_back(AffineMap::get(2, 0, {m}, context));
+    }
+    indexingMaps.push_back(AffineMap::get(2, 0, {m}, context));
+
+    SmallVector<utils::IteratorType> iteratorTypes = {utils::IteratorType::parallel, utils::IteratorType::reduction};
+
+    auto genericOp = rewriter.create<linalg::GenericOp>(
+        loc, resultType, inputs, ValueRange{outTensor}, indexingMaps, iteratorTypes,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+            Value combined = buildSemiringOperation(b, loc, op.getCombineOp(), args[0], args[1]);
+            Value out_val = op.getMask() ? args[3] : args[2];
+            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, out_val);
+            if (op.getMask()) {
+                Value mask_cond = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UGT, args[2], b.create<arith::ConstantOp>(loc, b.getFloatAttr(b.getF32Type(), 0.0)));
+                if (op.getMaskComplement()) mask_cond = b.create<arith::XOrIOp>(loc, mask_cond, b.create<arith::ConstantIntOp>(loc, 1, 1));
+                b.create<linalg::YieldOp>(loc, b.create<arith::SelectOp>(loc, mask_cond, reduced, out_val).getResult());
+            } else { b.create<linalg::YieldOp>(loc, reduced); }
+        });
+    rewriter.replaceOp(op, genericOp.getResult(0));
+    return success();
+  }
+};
+
+// ============================================================================
+// Fixed MxmOpLowering (Uses getA() and getB())
+// ============================================================================
+struct MxmOpLowering : public OpRewritePattern<gblas::MxmOp> {
+  using OpRewritePattern<gblas::MxmOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(gblas::MxmOp op, PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+    
+    Value outTensor = getInitializedOutputTensor(rewriter, loc, resultType);
+
+    MLIRContext *context = rewriter.getContext();
+    AffineExpr m, n, k; bindDims(context, m, n, k);
+
+    // FIXED: Use getA() and getB() instead of getLhs() / getRhs()
+    SmallVector<Value> inputs = {op.getA(), op.getB()};
+    SmallVector<AffineMap> indexingMaps = {AffineMap::get(3, 0, {m, k}, context), AffineMap::get(3, 0, {k, n}, context)};
+    
+    if (op.getMask()) {
+        inputs.push_back(op.getMask());
+        indexingMaps.push_back(AffineMap::get(3, 0, {m, n}, context));
+    }
+    indexingMaps.push_back(AffineMap::get(3, 0, {m, n}, context));
+
+    SmallVector<utils::IteratorType> iteratorTypes = {utils::IteratorType::parallel, utils::IteratorType::parallel, utils::IteratorType::reduction};
+
+    auto genericOp = rewriter.create<linalg::GenericOp>(
+        loc, resultType, inputs, ValueRange{outTensor}, indexingMaps, iteratorTypes,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+            Value combined = buildSemiringOperation(b, loc, op.getCombineOp(), args[0], args[1]);
+            Value out_val = op.getMask() ? args[3] : args[2];
+            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, out_val);
+            if (op.getMask()) {
+                Value mask_cond = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UGT, args[2], b.create<arith::ConstantOp>(loc, b.getFloatAttr(b.getF32Type(), 0.0)));
+                if (op.getMaskComplement()) mask_cond = b.create<arith::XOrIOp>(loc, mask_cond, b.create<arith::ConstantIntOp>(loc, 1, 1));
+                b.create<linalg::YieldOp>(loc, b.create<arith::SelectOp>(loc, mask_cond, reduced, out_val).getResult());
+            } else { b.create<linalg::YieldOp>(loc, reduced); }
+        });
+    rewriter.replaceOp(op, genericOp.getResult(0));
+    return success();
+  }
+};
+
+// ============================================================================
+// Fixed VxvOpLowering (Uses getA() / getB(), and removes invalid mask logic)
+// ============================================================================
 struct VxvOpLowering : public OpRewritePattern<gblas::VxvOp> {
   using OpRewritePattern<gblas::VxvOp>::OpRewritePattern;
-
   LogicalResult matchAndRewrite(gblas::VxvOp op, PatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     auto resultType = cast<RankedTensorType>(op.getResult().getType());
-
-    // 0D Output Tensor (Scalar)
-    Value emptyTensor = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{}, resultType.getElementType());
-    Value zero = rewriter.create<arith::ConstantOp>(loc, rewriter.getZeroAttr(resultType.getElementType()));
-    Value filledTensor = rewriter.create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{emptyTensor}).getResult(0);
-
-    // Affine Maps for Vector-Vector (Dot Product): A(k) * B(k) = Output()
-    MLIRContext *context = rewriter.getContext();
-    AffineExpr k;
-    bindDims(context, k);
     
+    Value outTensor = getInitializedOutputTensor(rewriter, loc, resultType);
+
+    MLIRContext *context = rewriter.getContext();
+    AffineExpr k; bindDims(context, k);
+
+    // FIXED: Use getA() and getB()
+    SmallVector<Value> inputs = {op.getA(), op.getB()};
+    
+    // No mask logic here! VXV returns a scalar, so masking is not applicable.
     SmallVector<AffineMap> indexingMaps = {
-        AffineMap::get(1, 0, {k}, context), // Vector A
-        AffineMap::get(1, 0, {k}, context), // Vector B
-        AffineMap::get(1, 0, {}, context)   // Output (0D, so empty layout)
+        AffineMap::get(1, 0, {k}, context), 
+        AffineMap::get(1, 0, {k}, context),
+        AffineMap::get(1, 0, {}, context) // Output is a 0D scalar tensor
     };
 
-    SmallVector<utils::IteratorType> iteratorTypes = {
-        utils::IteratorType::reduction  // k
-    };
+    SmallVector<utils::IteratorType> iteratorTypes = {utils::IteratorType::reduction};
 
     auto genericOp = rewriter.create<linalg::GenericOp>(
-        loc, resultType, 
-        ValueRange{op.getA(), op.getB()}, 
-        ValueRange{filledTensor},
-        indexingMaps, iteratorTypes,
+        loc, resultType, inputs, ValueRange{outTensor}, indexingMaps, iteratorTypes,
         [&](OpBuilder &b, Location loc, ValueRange args) {
+            // Apply the semiring correctly without worrying about mask condition checks
             Value combined = buildSemiringOperation(b, loc, op.getCombineOp(), args[0], args[1]);
             Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, args[2]);
             b.create<linalg::YieldOp>(loc, reduced);
         });
-
+        
     rewriter.replaceOp(op, genericOp.getResult(0));
     return success();
   }

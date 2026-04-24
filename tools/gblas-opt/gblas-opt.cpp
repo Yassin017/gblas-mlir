@@ -8,6 +8,8 @@
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/SparseTensor/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Vector/Transforms/BufferizableOpInterfaceImpl.h"
+
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 
 // Include only the specific standard dialects we need
@@ -36,7 +38,8 @@ int main(int argc, char **argv) {
                   mlir::linalg::LinalgDialect,
                   mlir::arith::ArithDialect,
                   mlir::scf::SCFDialect,
-                  mlir::sparse_tensor::SparseTensorDialect>();
+                  mlir::sparse_tensor::SparseTensorDialect,
+                  mlir::vector::VectorDialect>();
   
   // Register OUR custom GraphBLAS dialect
   registry.insert<mlir::gblas::GBLASDialect>();
@@ -46,6 +49,7 @@ int main(int argc, char **argv) {
   mlir::scf::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::tensor::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::sparse_tensor::registerBufferizableOpInterfaceExternalModels(registry);
+  mlir::vector::registerBufferizableOpInterfaceExternalModels(registry);
   mlir::bufferization::func_ext::registerBufferizableOpInterfaceExternalModels(registry);
   
   // --- THE FIX ---
