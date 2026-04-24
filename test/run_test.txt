@@ -1,0 +1,11 @@
+./tools/gblas-opt ../test/test_ewise.mlir \
+  --convert-gblas-to-linalg \
+  --linalg-generalize-named-ops \
+  --sparsification-and-bufferization \
+  --convert-linalg-to-loops | \
+../../../llvm-project/build/bin/mlir-opt \
+  --convert-scf-to-cf \
+  --convert-arith-to-llvm \
+  --convert-func-to-llvm \
+  --reconcile-unrealized-casts \
+  -o test_ewise.llvm

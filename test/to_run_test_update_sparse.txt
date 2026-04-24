@@ -1,0 +1,33 @@
+./tools/gblas-opt ../test/test_update_sparse.mlir --convert-gblas-to-linalg > step1.mlir
+
+../../../llvm-project/build/bin/mlir-opt step1.mlir \
+  --sparsifier \
+  --convert-linalg-to-loops \
+  --convert-scf-to-cf \
+  --convert-cf-to-llvm \
+  --expand-strided-metadata \
+  --lower-affine \
+  --convert-vector-to-llvm \
+  --finalize-memref-to-llvm \
+  --convert-arith-to-llvm \
+  --convert-func-to-llvm \
+  --reconcile-unrealized-casts \
+  -o step_llvm.mlir
+
+
+# 1. Translate to LLVM IR
+../../../llvm-project/build/bin/mlir-translate step_llvm.mlir -mlir-to-llvmir -o step3.ll
+
+# 2. Compile to Object
+../../../llvm-project/build/bin/llc step3.ll -filetype=obj -o test_update.o
+
+# 3. Link against the runtime
+clang++ test_update.o \
+  -L../../../llvm-project/build/lib \
+  -lmlir_c_runner_utils \
+  -lmlir_runner_utils \
+  -Wl,-rpath,../../../llvm-project/build/lib \
+  -o run_gblas
+
+# 4. Behold the output!
+./run_gblas

@@ -26,6 +26,8 @@ void GBLASDialect::initialize() {
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 
+#include "mlir/Interfaces/SideEffectInterfaces.h"
+
 LogicalResult EWiseAddOp::verify() {
   // 1. Force Ranked Tensors (Better than dyn_cast for safety)
   auto lhsType = llvm::dyn_cast<RankedTensorType>(getLhs().getType());
@@ -101,4 +103,43 @@ OpFoldResult NColsOp::fold(FoldAdaptor adaptor) {
       return {};
 
   return Builder(getContext()).getIndexAttr(rankedType.getDimSize(1));
+}
+
+LogicalResult UpdateOp::verify() {
+    auto inputType = llvm::dyn_cast<RankedTensorType>(getInput().getType());
+    auto outputType = llvm::dyn_cast<RankedTensorType>(getOutput().getType());
+
+    if (!inputType || !outputType)
+        return emitOpError("requires ranked tensor types");
+
+    if (inputType.getShape() != outputType.getShape())
+        return emitOpError("input and output dimensions must match");
+
+    if (mlir::Value mask = getMask()) {
+        auto maskType = llvm::dyn_cast<RankedTensorType>(mask.getType());
+        if (!maskType)
+            return emitOpError("mask must be a ranked tensor");
+            
+        if (maskType.getShape() != outputType.getShape())
+            return emitOpError("mask dimensions must match output");
+    }
+
+    if (getRes().getType() != getOutput().getType())
+        return emitOpError("result type must match output tensor type");
+    
+    return success();
+}
+
+void UpdateOp::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>> &effects) {
+    
+    // Use '&' to pass the pointer to the operand
+    effects.emplace_back(MemoryEffects::Read::get(), &getOperation()->getOpOperand(0));
+    
+    // Use '&' here as well for the in-place write
+    effects.emplace_back(MemoryEffects::Write::get(), &getOperation()->getOpOperand(1));
+
+    // And here for the optional mask
+    if (getMask())
+        effects.emplace_back(MemoryEffects::Read::get(), &getOperation()->getOpOperand(2));
 }

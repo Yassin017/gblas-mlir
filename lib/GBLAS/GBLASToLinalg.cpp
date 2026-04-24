@@ -620,16 +620,136 @@ struct NColsLowering : public OpConversionPattern<gblas::NColsOp> {
   }
 };
 
+struct UpdateOpLowering : public OpConversionPattern<gblas::UpdateOp> {
+  using OpConversionPattern<gblas::UpdateOp>::OpConversionPattern;
+
+  LogicalResult matchAndRewrite(gblas::UpdateOp op, OpAdaptor adaptor, 
+                                ConversionPatternRewriter &rewriter) const override {
+    
+    auto output = adaptor.getOutput(); 
+    auto input = adaptor.getInput();
+    Type resType = output.getType(); 
+
+    std::string accOp = op.getAccumulateOperator() ? op.getAccumulateOperator()->str() : "plus";
+
+    // --- THE FIX IS HERE ---
+    if (op.getReplace()) {
+        if (input.getType() == resType) {
+            // If the encodings are identical, we can just forward the value safely
+            rewriter.replaceOp(op, input);
+        } else {
+            // If encodings are different (e.g., COO -> CSR), we MUST use a convert op
+            // so the sparsifier knows to rebuild the index structures.
+            rewriter.replaceOpWithNewOp<sparse_tensor::ConvertOp>(op, resType, input);
+        }
+        return success();
+    }
+    // -----------------------
+
+    // 1. Map the blueprint variables to your actual operation's data
+    Location loc = op.getLoc();
+    // Change `op.getAccumulateOperator()` to whatever gets your "max" string!
+    // .value() returns the StringRef inside the optional
+    StringRef accumulateOpStr = op.getAccumulateOperator().value();
+
+    if (accOp == "plus") {
+        rewriter.replaceOpWithNewOp<linalg::AddOp>(op, resType, ValueRange{input, output}, ValueRange{output});
+    } else if (accOp == "max") {
+        // 2. Set up the Linalg boilerplate based on your tensor's rank
+        // Assuming op.getA() and op.getB() are your input/output sparse tensors
+        auto inputType = llvm::cast<RankedTensorType>(op.getOperand(0).getType());
+        int64_t rank = inputType.getRank();
+        
+        SmallVector<AffineMap> indexingMaps(3, rewriter.getMultiDimIdentityMap(rank));
+        SmallVector<utils::IteratorType> iteratorTypes(rank, utils::IteratorType::parallel);
+        
+        SmallVector<Value, 2> inputValues = {op.getOperand(0), op.getOperand(1)};
+        ValueRange inputs(inputValues);
+
+        SmallVector<Value, 1> outputValues = {op.getOperand(1)};
+        ValueRange outputs(outputValues);
+        // Use the Type directly; TypeRange can be constructed from a single Type
+        Type resultType = outputs[0].getType();
+        TypeRange resultTypes(resultType);
+
+        // 3. Create the linalg::GenericOp
+        auto genericOp = rewriter.create<linalg::GenericOp>(
+            loc,
+            resultTypes,
+            inputs,
+            outputs,
+            indexingMaps,
+            iteratorTypes,
+            [&](OpBuilder &b, Location loc, ValueRange args) {
+                Value inVal = args[0]; 
+                Value outVal = args[1];
+
+                // 4. Create the sparse_tensor::BinaryOp (No enums, just the inputs)
+                auto binaryOp = b.create<sparse_tensor::BinaryOp>(
+                    loc,
+                    inVal.getType(),
+                    inVal,
+                    outVal
+                );
+
+                // 5. OVERLAP REGION: What to do when both have a value -> arith.maximumf
+                Block *overlapBlock = b.createBlock(&binaryOp.getOverlapRegion());
+                overlapBlock->addArgument(inVal.getType(), loc);
+                overlapBlock->addArgument(outVal.getType(), loc);
+                Value maxVal = b.create<arith::MaximumFOp>(loc, overlapBlock->getArgument(0), overlapBlock->getArgument(1));
+                b.create<sparse_tensor::YieldOp>(loc, maxVal);
+
+                // 6. LEFT REGION (Identity): Left exists, right is implicit zero -> keep left
+                Block *leftBlock = b.createBlock(&binaryOp.getLeftRegion());
+                leftBlock->addArgument(inVal.getType(), loc);
+                b.create<sparse_tensor::YieldOp>(loc, leftBlock->getArgument(0));
+
+                // 7. RIGHT REGION (Identity): Right exists, left is implicit zero -> keep right
+                Block *rightBlock = b.createBlock(&binaryOp.getRightRegion());
+                rightBlock->addArgument(outVal.getType(), loc);
+                b.create<sparse_tensor::YieldOp>(loc, rightBlock->getArgument(0));
+
+                // 8. Yield the result of the BinaryOp back to the generic loop
+                b.setInsertionPointAfter(binaryOp);
+                b.create<linalg::YieldOp>(loc, binaryOp.getResult());
+            });
+
+        rewriter.replaceOp(op, genericOp.getResults());
+    } else if (accOp == "min") {
+        rewriter.replaceOpWithNewOp<linalg::MinOp>(op, resType, ValueRange{input, output}, ValueRange{output});
+    } else {
+        return op.emitError("unsupported accumulate operator: ") << accOp;
+    }
+    return success();
+  }
+};
+
 
 struct ConvertGBLASToLinalgPass 
     : public gblas::impl::ConvertGBLASToLinalgBase<ConvertGBLASToLinalgPass> {
-  void runOnOperation() override {
+
+      void getDependentDialects(DialectRegistry &registry) const override {
+        registry.insert<linalg::LinalgDialect, 
+                      bufferization::BufferizationDialect,
+                      scf::SCFDialect,
+                      tensor::TensorDialect,
+                      arith::ArithDialect,
+                      sparse_tensor::SparseTensorDialect>();
+      }
+
+    void runOnOperation() override {
+
     ConversionTarget target(getContext());
+
+    TypeConverter typeConverter;
+    typeConverter.addConversion([](Type type) { return type; });
+
     target.addIllegalDialect<gblas::GBLASDialect>();
     target.addLegalDialect<linalg::LinalgDialect, tensor::TensorDialect, 
                            arith::ArithDialect, scf::SCFDialect>();
 
     target.addLegalDialect<bufferization::BufferizationDialect>();
+    target.addLegalOp<bufferization::AllocTensorOp>();
     target.addLegalOp<bufferization::AllocTensorOp>();
 
     target.addLegalDialect<
@@ -637,20 +757,22 @@ struct ConvertGBLASToLinalgPass
       scf::SCFDialect,
       tensor::TensorDialect,
       arith::ArithDialect,
+      bufferization::BufferizationDialect,
       sparse_tensor::SparseTensorDialect>();
 
     target.addIllegalOp<gblas::EWiseAddOp>();
+    target.addIllegalOp<gblas::UpdateOp>();
 
     RewritePatternSet patterns(&getContext());
-
+    // Register standard RewritePatterns (NO typeConverter needed)
     patterns.add<FromCooOpLowering, 
                  MxmOpLowering, 
                  MxvOpLowering, 
                  VxmOpLowering, 
-                 VxvOpLowering,
-                 EWiseAddLowering,
-                 NRowsLowering,
-                 NColsLowering>(&getContext());
+                 VxvOpLowering>(&getContext());
+
+    // Register ConversionPatterns (MUST pass typeConverter to prevent Segfault)
+    patterns.add<EWiseAddLowering, NRowsLowering, NColsLowering, UpdateOpLowering>(typeConverter, &getContext());
 
     if (failed(applyPartialConversion(getOperation(), target, std::move(patterns)))) {
       signalPassFailure();
@@ -667,34 +789,3 @@ std::unique_ptr<Pass> createConvertGBLASToLinalgPass() {
 }
 } // namespace gblas
 } // namespace mlir 
-
-
-
-// struct MxmOpLowering : public OpRewritePattern<gblas::MxmOp> {
-//   using OpRewritePattern<gblas::MxmOp>::OpRewritePattern;
-
-//   LogicalResult matchAndRewrite(gblas::MxmOp op, PatternRewriter &rewriter) const override {
-//     Location loc = op.getLoc();
-//     auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
-//     if (!resultType) return failure();
-
-//     // Use the same consistent allocator you used in EWiseAdd
-//     auto allocOp = rewriter.create<bufferization::AllocTensorOp>(
-//         loc, resultType, ValueRange{}, Value(), IntegerAttr());
-
-//     // Create a zero constant for filling
-//     Value zero = rewriter.create<arith::ConstantOp>(
-//         loc, rewriter.getZeroAttr(resultType.getElementType()));
-
-//     // Use linalg.fill on the allocated tensor
-//     Value filledTensor = rewriter.create<linalg::FillOp>(
-//         loc, ValueRange{zero}, ValueRange{allocOp}).getResult(0);
-
-//     // Now create the Matmul
-//     // Note: Use replaceOpWithNewOp to be cleaner
-//     rewriter.replaceOpWithNewOp<linalg::MatmulOp>(
-//         op, resultType, ValueRange{op.getA(), op.getB()}, ValueRange{filledTensor});
-
-//     return success();
-//   }
-// };

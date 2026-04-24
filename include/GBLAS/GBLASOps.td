@@ -133,4 +133,33 @@ def GBLAS_NColsOp : GBLAS_Op<"ncols", [Pure]> {
     let assemblyFormat = "$input attr-dict `:` type($input) `->` type($res)";
 }
 
+def GBLAS_UpdateOp : GBLAS_Op<"update", [
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+    AllTypesMatch<["output", "res"]> // This tells MLIR res and output have the same type
+]> {
+    let summary = "In-place update of a sparse tensor or vector.";
+    let description = [{
+        Updates the '$output' tensor using '$input'. 
+        If '$mask' is present, it restricts the update.
+    }];
+
+    let arguments = (ins
+        AnyTensor:$input,
+        AnyTensor:$output,
+        Optional<AnyTensor>:$mask,
+        OptionalAttr<StrAttr>:$accumulate_operator,
+        DefaultValuedAttr<BoolAttr, "false">:$replace,
+        DefaultValuedAttr<BoolAttr, "false">:$mask_complement
+    );
+
+    let results = (outs AnyTensor:$res); 
+
+    let assemblyFormat = [{
+        $input `->` $output (`(` $mask^ `)`)? attr-dict 
+        `:` type($input) `->` type($output) (`(` type($mask)^ `)`)?
+    }];
+
+    let hasVerifier = 1;
+}
+
 #endif // GBLAS_OPS
