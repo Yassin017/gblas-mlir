@@ -7,7 +7,6 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 class GBLAS_Op<string mnemonic, list<Trait> traits = []> :
     Op<GBLAS_Dialect, mnemonic, traits>;
 
-// 1. Build Operation (from_coo)
 def GBLAS_FromCooOp : GBLAS_Op<"from_coo", [Pure]> {
   let summary = "Builds a GraphBLAS tensor from coordinate tensors";
   let description = [{
@@ -25,7 +24,6 @@ def GBLAS_FromCooOp : GBLAS_Op<"from_coo", [Pure]> {
   }];
 }
 
-// 2. Matrix-Matrix Multiply (mxm)
 def GBLAS_MxmOp : GBLAS_Op<"mxm", [Pure]> {
   let summary = "GraphBLAS matrix-matrix multiply";
   let arguments = (ins
@@ -42,7 +40,6 @@ def GBLAS_MxmOp : GBLAS_Op<"mxm", [Pure]> {
   }];
 }
 
-// 3. Matrix-Vector Multiply (mxv)
 def GBLAS_MxvOp : GBLAS_Op<"mxv", [Pure]> {
   let summary = "GraphBLAS matrix-vector multiply";
   let arguments = (ins
@@ -59,7 +56,6 @@ def GBLAS_MxvOp : GBLAS_Op<"mxv", [Pure]> {
   }];
 }
 
-// 4. Vector-Matrix Multiply (vxm)
 def GBLAS_VxmOp : GBLAS_Op<"vxm", [Pure]> {
   let summary = "GraphBLAS vector-matrix multiply";
   let arguments = (ins
@@ -76,7 +72,6 @@ def GBLAS_VxmOp : GBLAS_Op<"vxm", [Pure]> {
   }];
 }
 
-// 5. Vector-Vector Multiply (vxv)
 def GBLAS_VxvOp : GBLAS_Op<"vxv", [Pure]> {
   let summary = "GraphBLAS vector-vector multiply (Dot Product)";
   let arguments = (ins
@@ -160,6 +155,43 @@ def GBLAS_UpdateOp : GBLAS_Op<"update", [
     }];
 
     let hasVerifier = 1;
+}
+
+
+def GBLAS_IntersectOp : GBLAS_Op<"intersect", [Pure]> {
+  let summary = "Element-wise intersection of two sparse tensors";
+  let description = [{
+    Computes the set intersection of two sparse tensors using a specified binary operator.
+  }];
+
+  let arguments = (ins
+    AnyTensor:$a,
+    AnyTensor:$b,
+    Optional<AnyTensor>:$mask,
+    GBLAS_BinaryOp:$intersect_operator,
+    DefaultValuedAttr<BoolAttr, "false">:$mask_complement
+  );
+
+  let results = (outs AnyTensor:$result);
+
+  let assemblyFormat = [{
+    $intersect_operator operands attr-dict `:` functional-type(operands, results)
+  }];
+}
+
+
+def GBLAS_TransposeOp : GBLAS_Op<"transpose", [Pure]> {
+  let summary = "Transpose operation.";
+  let description = [{
+    Returns a new sparse matrix that's the transpose of the input matrix.
+  }];
+
+  let arguments = (ins AnyRankedTensor:$input);
+  let results = (outs AnyRankedTensor:$output);
+
+  let assemblyFormat = [{
+    $input attr-dict `:` type($input) `to` type($output)
+  }];
 }
 
 #endif // GBLAS_OPS
