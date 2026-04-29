@@ -61,14 +61,17 @@ def GBLAS_VxmOp : GBLAS_Op<"vxm", [Pure]> {
   let arguments = (ins
     1DTensorOf<[AnyType]>:$vector,
     2DTensorOf<[AnyType]>:$matrix,
+    1DTensorOf<[AnyType]>:$outs,    // <-- 1. Add outs here
     Optional<1DTensorOf<[AnyType]>>:$mask,
     GBLAS_BinaryOp:$combine_op,
     GBLAS_BinaryOp:$reduce_op,
     DefaultValuedAttr<BoolAttr, "false">:$mask_complement
   );
   let results = (outs 1DTensorOf<[AnyType]>:$result);
+  
+  // 2. Add `outs` `(` $outs `)` to the assembly format and `type($outs)`
   let assemblyFormat = [{
-    $vector `,` $matrix (`,` $mask^)? `combine` `=` $combine_op `reduce` `=` $reduce_op attr-dict `:` type($vector) `,` type($matrix) (`,` type($mask)^)? `->` type($result)
+    $vector `,` $matrix `outs` `(` $outs `)` (`,` $mask^)? `combine` `=` $combine_op `reduce` `=` $reduce_op attr-dict `:` type($vector) `,` type($matrix) `,` type($outs) (`,` type($mask)^)? `->` type($result)
   }];
 }
 

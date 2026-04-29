@@ -1134,33 +1134,88 @@ struct IntersectOpLowering : public OpRewritePattern<gblas::IntersectOp> {
 
 struct VxmOpLowering : public OpRewritePattern<gblas::VxmOp> {
   using OpRewritePattern<gblas::VxmOp>::OpRewritePattern;
+
   LogicalResult matchAndRewrite(gblas::VxmOp op, PatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     auto resultType = cast<RankedTensorType>(op.getResult().getType());
-    Value outTensor = getInitializedOutputTensor(rewriter, loc, resultType);
     MLIRContext *context = rewriter.getContext();
-    AffineExpr n, k; bindDims(context, n, k);
-    SmallVector<Value> inputs = {op.getVector(), op.getMatrix()};
-    SmallVector<AffineMap> indexingMaps = { AffineMap::get(2, 0, {k}, context), AffineMap::get(2, 0, {k, n}, context) };
-    if (op.getMask()) {
-        inputs.push_back(op.getMask());
-        indexingMaps.push_back(AffineMap::get(2, 0, {n}, context));
-    }
-    indexingMaps.push_back(AffineMap::get(2, 0, {n}, context)); 
-    SmallVector<utils::IteratorType> iteratorTypes = {utils::IteratorType::parallel, utils::IteratorType::reduction};
-    auto genericOp = rewriter.create<linalg::GenericOp>(
-        loc, resultType, inputs, ValueRange{outTensor}, indexingMaps, iteratorTypes,
+    
+    // Setup dimensions for the 2D VXM loop
+    AffineExpr n, k; 
+    bindDims(context, n, k);
+    
+    // ==========================================
+    // STEP 1: PURE MATH (For the Sparsifier)
+    // ==========================================
+    SmallVector<Value> mathInputs = {op.getVector(), op.getMatrix()};
+    SmallVector<AffineMap> mathMaps = { 
+        AffineMap::get(2, 0, {k}, context),     // Vector
+        AffineMap::get(2, 0, {k, n}, context),  // Matrix
+        AffineMap::get(2, 0, {n}, context)      // Outs (Accumulator)
+    };
+    SmallVector<utils::IteratorType> mathIterators = {
+        utils::IteratorType::parallel, 
+        utils::IteratorType::reduction
+    };
+
+    auto mathOp = rewriter.create<linalg::GenericOp>(
+        loc, resultType, mathInputs, ValueRange{op.getOuts()}, mathMaps, mathIterators,
         [&](OpBuilder &b, Location loc, ValueRange args) {
+            // args[0] = vector, args[1] = matrix, args[2] = outs
             Value combined = buildSemiringOperation(b, loc, op.getCombineOp(), args[0], args[1]);
-            Value out_val = op.getMask() ? args[3] : args[2];
-            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, out_val);
-            if (op.getMask()) {
-                Value mask_cond = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UGT, args[2], b.create<arith::ConstantOp>(loc, b.getFloatAttr(b.getF32Type(), 0.0)));
-                if (op.getMaskComplement()) mask_cond = b.create<arith::XOrIOp>(loc, mask_cond, b.create<arith::ConstantIntOp>(loc, 1, 1));
-                b.create<linalg::YieldOp>(loc, b.create<arith::SelectOp>(loc, mask_cond, reduced, out_val).getResult());
-            } else { b.create<linalg::YieldOp>(loc, reduced); }
+            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, args[2]);
+            b.create<linalg::YieldOp>(loc, reduced);
         });
-    rewriter.replaceOp(op, genericOp.getResult(0));
+
+    // If no mask was provided in the IR, we are done!
+    if (!op.getMask()) {
+        rewriter.replaceOp(op, mathOp.getResult(0));
+        return success();
+    }
+
+    // ==========================================
+    // STEP 2: DENSE LOGIC (For Standard LLVM)
+    // ==========================================
+    // This is a 1D loop evaluating the mask element-by-element
+    AffineExpr d0; 
+    bindDims(context, d0);
+    
+    SmallVector<Value> maskInputs = {mathOp.getResult(0), op.getMask()};
+    SmallVector<AffineMap> maskMaps = {
+        AffineMap::get(1, 0, {d0}, context), // Input 1: Newly computed math values
+        AffineMap::get(1, 0, {d0}, context), // Input 2: The Mask
+        AffineMap::get(1, 0, {d0}, context)  // Outs: Original state to fall back on
+    };
+    SmallVector<utils::IteratorType> maskIterators = {utils::IteratorType::parallel};
+
+    auto maskOp = rewriter.create<linalg::GenericOp>(
+        loc, resultType, maskInputs, ValueRange{op.getOuts()}, maskMaps, maskIterators,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+            Value computed_val = args[0];
+            Value mask_val = args[1];
+            Value original_val = args[2]; // op.getOuts()
+
+            // 1. Check if mask value > 0
+            Value mask_cond = b.create<arith::CmpFOp>(
+                loc, arith::CmpFPredicate::UGT, mask_val, 
+                b.create<arith::ConstantOp>(loc, b.getFloatAttr(b.getF32Type(), 0.0))
+            );
+            
+            // 2. Invert logic if complement is true
+            if (op.getMaskComplement()) {
+                mask_cond = b.create<arith::XOrIOp>(
+                    loc, mask_cond, 
+                    b.create<arith::ConstantIntOp>(loc, 1, 1) // true
+                );
+            }
+            
+            // 3. Select computed value if condition is met, else revert to original
+            Value selected = b.create<arith::SelectOp>(loc, mask_cond, computed_val, original_val);
+            b.create<linalg::YieldOp>(loc, selected);
+        });
+
+    // Replace the original gblas.vxm with the final masked output
+    rewriter.replaceOp(op, maskOp.getResult(0));
     return success();
   }
 };
