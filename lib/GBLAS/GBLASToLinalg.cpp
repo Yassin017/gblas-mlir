@@ -1263,24 +1263,39 @@ struct MxmOpLowering : public OpRewritePattern<gblas::MxmOp> {
     AffineExpr m, n, k; bindDims(context, m, n, k);
     SmallVector<Value> inputs = {op.getA(), op.getB()};
     SmallVector<AffineMap> indexingMaps = {AffineMap::get(3, 0, {m, k}, context), AffineMap::get(3, 0, {k, n}, context)};
+    
     if (op.getMask()) {
         inputs.push_back(op.getMask());
         indexingMaps.push_back(AffineMap::get(3, 0, {m, n}, context));
     }
     indexingMaps.push_back(AffineMap::get(3, 0, {m, n}, context));
     SmallVector<utils::IteratorType> iteratorTypes = {utils::IteratorType::parallel, utils::IteratorType::parallel, utils::IteratorType::reduction};
+    
     auto genericOp = rewriter.create<linalg::GenericOp>(
         loc, resultType, inputs, ValueRange{outTensor}, indexingMaps, iteratorTypes,
         [&](OpBuilder &b, Location loc, ValueRange args) {
+            
+            // 1. Compute A * B
             Value combined = buildSemiringOperation(b, loc, op.getCombineOp(), args[0], args[1]);
             Value out_val = op.getMask() ? args[3] : args[2];
-            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, out_val);
+            
+            // 2. THE FIX: Algebraic Masking 
             if (op.getMask()) {
-                Value mask_cond = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UGT, args[2], b.create<arith::ConstantOp>(loc, b.getFloatAttr(b.getF32Type(), 0.0)));
-                if (op.getMaskComplement()) mask_cond = b.create<arith::XOrIOp>(loc, mask_cond, b.create<arith::ConstantIntOp>(loc, 1, 1));
-                b.create<linalg::YieldOp>(loc, b.create<arith::SelectOp>(loc, mask_cond, reduced, out_val).getResult());
-            } else { b.create<linalg::YieldOp>(loc, reduced); }
+                Value mask_val = args[2];
+                // If complement is requested, invert the mask: (1.0 - mask)
+                if (op.getMaskComplement()) {
+                    Value one = b.create<arith::ConstantOp>(loc, b.getFloatAttr(b.getF32Type(), 1.0));
+                    mask_val = b.create<arith::SubFOp>(loc, one, mask_val);
+                }
+                // Multiply the combined result by the mask
+                combined = b.create<arith::MulFOp>(loc, combined, mask_val);
+            }
+            
+            // 3. Accumulate: out = out + combined
+            Value reduced = buildSemiringOperation(b, loc, op.getReduceOp(), combined, out_val);
+            b.create<linalg::YieldOp>(loc, reduced);
         });
+        
     rewriter.replaceOp(op, genericOp.getResult(0));
     return success();
   }
@@ -1432,7 +1447,44 @@ struct UpdateOpLowering : public OpConversionPattern<gblas::UpdateOp> {
 
         rewriter.replaceOp(op, genericOp.getResults());
     } else if (accOp == "min") {
-        rewriter.replaceOpWithNewOp<linalg::MinOp>(op, resType, ValueRange{input, output}, ValueRange{output});
+        auto inputType = llvm::cast<RankedTensorType>(op.getOperand(0).getType());
+        int64_t rank = inputType.getRank();
+        
+        SmallVector<AffineMap> indexingMaps(3, rewriter.getMultiDimIdentityMap(rank));
+        SmallVector<utils::IteratorType> iteratorTypes(rank, utils::IteratorType::parallel);
+        SmallVector<Value, 2> inputValues = {op.getOperand(0), op.getOperand(1)};
+        SmallVector<Value, 1> outputValues = {op.getOperand(1)};
+        Type resultType = outputValues[0].getType();
+
+        auto genericOp = rewriter.create<linalg::GenericOp>(
+            loc, TypeRange(resultType), ValueRange(inputValues), ValueRange(outputValues),
+            indexingMaps, iteratorTypes,
+            [&](OpBuilder &b, Location loc, ValueRange args) {
+                Value inVal = args[0]; 
+                Value outVal = args[1];
+                auto binaryOp = b.create<sparse_tensor::BinaryOp>(loc, inVal.getType(), inVal, outVal);
+
+                Block *overlapBlock = b.createBlock(&binaryOp.getOverlapRegion());
+                overlapBlock->addArgument(inVal.getType(), loc);
+                overlapBlock->addArgument(outVal.getType(), loc);
+                
+                // --- THE ONLY CHANGE: Use MinimumFOp ---
+                Value minVal = b.create<arith::MinimumFOp>(loc, overlapBlock->getArgument(0), overlapBlock->getArgument(1));
+                b.create<sparse_tensor::YieldOp>(loc, minVal);
+
+                Block *leftBlock = b.createBlock(&binaryOp.getLeftRegion());
+                leftBlock->addArgument(inVal.getType(), loc);
+                b.create<sparse_tensor::YieldOp>(loc, leftBlock->getArgument(0));
+
+                Block *rightBlock = b.createBlock(&binaryOp.getRightRegion());
+                rightBlock->addArgument(outVal.getType(), loc);
+                b.create<sparse_tensor::YieldOp>(loc, rightBlock->getArgument(0));
+
+                b.setInsertionPointAfter(binaryOp);
+                b.create<linalg::YieldOp>(loc, binaryOp.getResult());
+            });
+
+        rewriter.replaceOp(op, genericOp.getResults());
     } else {
         return op.emitError("unsupported accumulate operator: ") << accOp;
     }
