@@ -20,11 +20,13 @@ def GBLAS_BinaryOp_First : I32EnumAttrCase<"first", 4>;
 def GBLAS_BinaryOp_Second : I32EnumAttrCase<"second", 5>;
 def GBLAS_BinaryOp_LogicalAnd : I32EnumAttrCase<"land", 6>;
 def GBLAS_BinaryOp_LogicalOr  : I32EnumAttrCase<"lor", 7>;
+def GBLAS_BinaryOp_Div : I32EnumAttrCase<"div", 8>;
+def GBLAS_BinaryOp_Minus : I32EnumAttrCase<"minus", 9>;
 
 def GBLAS_BinaryOp : I32EnumAttr<"BinaryOp", "GraphBLAS Binary Operator",
   [GBLAS_BinaryOp_Plus, GBLAS_BinaryOp_Multiplies, GBLAS_BinaryOp_Min,
    GBLAS_BinaryOp_Max, GBLAS_BinaryOp_First, GBLAS_BinaryOp_Second,
-   GBLAS_BinaryOp_LogicalAnd, GBLAS_BinaryOp_LogicalOr]> {
+   GBLAS_BinaryOp_LogicalAnd, GBLAS_BinaryOp_LogicalOr, GBLAS_BinaryOp_Div, GBLAS_BinaryOp_Minus]> {
   let cppNamespace = "::mlir::gblas";
 }
 

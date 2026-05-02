@@ -12,17 +12,19 @@
 
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 
+
 // Include only the specific standard dialects we need
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 
 #include "mlir/Dialect/SparseTensor/IR/SparseTensor.h" 
-
 #include "mlir/Dialect/SparseTensor/Transforms/Passes.h"
-
 #include "mlir/Dialect/Linalg/Passes.h" 
 
 // Include our custom GraphBLAS dialect AND Passes
@@ -39,7 +41,10 @@ int main(int argc, char **argv) {
                   mlir::arith::ArithDialect,
                   mlir::scf::SCFDialect,
                   mlir::sparse_tensor::SparseTensorDialect,
-                  mlir::vector::VectorDialect>();
+                  mlir::vector::VectorDialect,
+                  mlir::memref::MemRefDialect,
+                  mlir::bufferization::BufferizationDialect,
+                  mlir::cf::ControlFlowDialect>();
   
   // Register OUR custom GraphBLAS dialect
   registry.insert<mlir::gblas::GBLASDialect>();

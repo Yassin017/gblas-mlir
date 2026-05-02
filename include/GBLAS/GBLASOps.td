@@ -7,6 +7,23 @@ include "mlir/Interfaces/SideEffectInterfaces.td"
 class GBLAS_Op<string mnemonic, list<Trait> traits = []> :
     Op<GBLAS_Dialect, mnemonic, traits>;
 
+// def GBLAS_FromCooOp : GBLAS_Op<"from_coo", [Pure]> {
+//   let summary = "Builds a GraphBLAS tensor from coordinate tensors";
+//   let description = [{
+//     Builds a new sparse tensor using a 2D dense tensor representing the
+//     indices as coordinates and a 1D tensor of associated values.
+//     Returns either a 1D vector or a 2D matrix based on the output type.
+//   }];
+//   let arguments = (ins 
+//     2DTensorOf<[AnyInteger]>:$indices, 
+//     1DTensorOf<[AnyType]>:$values
+//   );
+//   let results = (outs AnyTensor:$result);
+//   let assemblyFormat = [{
+//     $indices `,` $values attr-dict `:` type($indices) `,` type($values) `->` type($result)
+//   }];
+// }
+
 def GBLAS_FromCooOp : GBLAS_Op<"from_coo", [Pure]> {
   let summary = "Builds a GraphBLAS tensor from coordinate tensors";
   let description = [{
@@ -16,13 +33,15 @@ def GBLAS_FromCooOp : GBLAS_Op<"from_coo", [Pure]> {
   }];
   let arguments = (ins 
     2DTensorOf<[AnyInteger]>:$indices, 
-    1DTensorOf<[AnyType]>:$values
+    1DTensorOf<[AnyType]>:$values,
+    Variadic<Index>:$dynamic_sizes // Added dynamic sizes
   );
   let results = (outs AnyTensor:$result);
   let assemblyFormat = [{
-    $indices `,` $values attr-dict `:` type($indices) `,` type($values) `->` type($result)
+    $indices `,` $values ( `(` $dynamic_sizes^ `)` )? attr-dict `:` type($indices) `,` type($values) `->` type($result)
   }];
 }
+
 
 def GBLAS_MxmOp : GBLAS_Op<"mxm", [Pure]> {
   let summary = "GraphBLAS matrix-matrix multiply";
@@ -56,21 +75,47 @@ def GBLAS_MxvOp : GBLAS_Op<"mxv", [Pure]> {
   }];
 }
 
+/**
 def GBLAS_VxmOp : GBLAS_Op<"vxm", [Pure]> {
   let summary = "GraphBLAS vector-matrix multiply";
   let arguments = (ins
     1DTensorOf<[AnyType]>:$vector,
     2DTensorOf<[AnyType]>:$matrix,
     Optional<1DTensorOf<[AnyType]>>:$mask,
+    1DTensorOf<[AnyType]>:$out,  // <--- ADDED: The destination buffer
     GBLAS_BinaryOp:$combine_op,
     GBLAS_BinaryOp:$reduce_op,
     DefaultValuedAttr<BoolAttr, "false">:$mask_complement
   );
   let results = (outs 1DTensorOf<[AnyType]>:$result);
+  
+  // <--- UPDATED: Added `out = $out` and `type($out)` to the format
   let assemblyFormat = [{
-    $vector `,` $matrix (`,` $mask^)? `combine` `=` $combine_op `reduce` `=` $reduce_op attr-dict `:` type($vector) `,` type($matrix) (`,` type($mask)^)? `->` type($result)
+    $vector `,` $matrix (`,` $mask^)? `out` `=` $out `combine` `=` $combine_op `reduce` `=` $reduce_op attr-dict `:` type($vector) `,` type($matrix) (`,` type($mask)^)? `,` type($out) `->` type($result)
   }];
 }
+**/
+
+def GBLAS_VxmOp : GBLAS_Op<"vxm", [Pure]> {
+  let summary = "GraphBLAS vector-matrix multiply";
+  let arguments = (ins
+    1DTensorOf<[AnyType]>:$vector,
+    2DTensorOf<[AnyType]>:$matrix,
+    1DTensorOf<[AnyType]>:$outs, // <-- 1. Add outs here
+    Optional<1DTensorOf<[AnyType]>>:$mask,
+    GBLAS_BinaryOp:$combine_op,
+    GBLAS_BinaryOp:$reduce_op,
+    DefaultValuedAttr<BoolAttr, "false">:$mask_complement
+  );
+  let results = (outs 1DTensorOf<[AnyType]>:$result);
+  
+  // 2. Add `outs` `(` $outs `)` to the assembly format and `type($outs)`
+  let assemblyFormat = [{
+    $vector `,` $matrix `outs` `(` $outs `)` (`,` $mask^)? `combine` `=` $combine_op `reduce` `=` $reduce_op attr-dict `:` type($vector) `,` type($matrix) `,` type($outs) (`,` type($mask)^)? `->` type($result)
+  }];
+}
+
+
 
 def GBLAS_VxvOp : GBLAS_Op<"vxv", [Pure]> {
   let summary = "GraphBLAS vector-vector multiply (Dot Product)";
@@ -128,6 +173,7 @@ def GBLAS_NColsOp : GBLAS_Op<"ncols", [Pure]> {
     let assemblyFormat = "$input attr-dict `:` type($input) `->` type($res)";
 }
 
+
 def GBLAS_UpdateOp : GBLAS_Op<"update", [
     DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
     AllTypesMatch<["output", "res"]> // This tells MLIR res and output have the same type
@@ -156,6 +202,7 @@ def GBLAS_UpdateOp : GBLAS_Op<"update", [
 
     let hasVerifier = 1;
 }
+
 
 
 def GBLAS_IntersectOp : GBLAS_Op<"intersect", [Pure]> {
@@ -191,6 +238,61 @@ def GBLAS_TransposeOp : GBLAS_Op<"transpose", [Pure]> {
 
   let assemblyFormat = [{
     $input attr-dict `:` type($input) `to` type($output)
+  }];
+}
+
+
+def GBLAS_ToPtrOp : GBLAS_Op<"to_ptr", [Pure]> {
+  let summary = "Casts a sparse tensor to an opaque pointer to bypass strict bufferization";
+  let arguments = (ins AnyTensor:$input);
+  let results = (outs AnyType:$output);
+  let assemblyFormat = "$input attr-dict `:` type($input) `->` type($output)";
+}
+
+def GBLAS_FromPtrOp : GBLAS_Op<"from_ptr", [Pure]> {
+  let summary = "Casts an opaque pointer back to a sparse tensor";
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyTensor:$output);
+  let assemblyFormat = "$input attr-dict `:` type($input) `->` type($output)";
+}
+
+
+def GBLAS_ApplyOp : GBLAS_Op<"apply", [Pure]> {
+  let summary = "Applies a unary or binary operator to a tensor";
+  let arguments = (ins
+    AnyTensor:$input,
+    Optional<AnyType>:$scalar,
+    StrAttr:$apply_op // e.g., "div", "second", "abs"
+  );
+  let results = (outs AnyTensor:$result);
+  
+  let assemblyFormat = [{
+    $input (`,` $scalar^)? `op` `=` $apply_op attr-dict `:` type($input) (`,` type($scalar)^)? `->` type($result)
+  }];
+}
+
+def GBLAS_ReduceToVectorOp : GBLAS_Op<"reduce_to_vector", [Pure]> {
+  let summary = "Reduces a 2D matrix to a 1D vector";
+  let arguments = (ins 
+    AnyTensor:$input,
+    StrAttr:$reduce_op,
+    DefaultValuedAttr<I64Attr, "1">:$axis
+  );
+  let results = (outs AnyTensor:$result);
+  let assemblyFormat = [{
+    $input `reduce` `=` $reduce_op `axis` `=` $axis attr-dict `:` type($input) `->` type($result)
+  }];
+}
+
+def GBLAS_ReduceToScalarOp : GBLAS_Op<"reduce_to_scalar", [Pure]> {
+  let summary = "Reduces a tensor to a single scalar value";
+  let arguments = (ins 
+    AnyTensor:$input,
+    StrAttr:$reduce_op
+  );
+  let results = (outs AnyType:$result);
+  let assemblyFormat = [{
+    $input `reduce` `=` $reduce_op attr-dict `:` type($input) `->` type($result)
   }];
 }
 

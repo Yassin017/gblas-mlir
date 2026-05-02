@@ -19,6 +19,8 @@ target_link_libraries(gblas-opt PRIVATE
   MLIRArithDialect
   MLIRSCFDialect    
   MLIRSparseTensorDialect   # for sparse encoding
+  MLIRBufferizationDialect
+  MLIRControlFlowDialect
 
   MLIRSparseTensorTransforms
   MLIRSparseTensorPipelines
