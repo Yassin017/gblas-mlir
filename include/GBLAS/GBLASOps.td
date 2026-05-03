@@ -81,6 +81,7 @@ def GBLAS_VxmOp : GBLAS_Op<"vxm", [Pure]> {
   let arguments = (ins
     1DTensorOf<[AnyType]>:$vector,
     2DTensorOf<[AnyType]>:$matrix,
+    1DTensorOf<[AnyType]>:$outs,    // <-- 1. Add outs here
     Optional<1DTensorOf<[AnyType]>>:$mask,
     1DTensorOf<[AnyType]>:$out,  // <--- ADDED: The destination buffer
     GBLAS_BinaryOp:$combine_op,
@@ -88,10 +89,11 @@ def GBLAS_VxmOp : GBLAS_Op<"vxm", [Pure]> {
     DefaultValuedAttr<BoolAttr, "false">:$mask_complement
   );
   let results = (outs 1DTensorOf<[AnyType]>:$result);
-  
-  // <--- UPDATED: Added `out = $out` and `type($out)` to the format
+
+  // 2. Add `outs` `(` $outs `)` to the assembly format and `type($outs)`
   let assemblyFormat = [{
-    $vector `,` $matrix (`,` $mask^)? `out` `=` $out `combine` `=` $combine_op `reduce` `=` $reduce_op attr-dict `:` type($vector) `,` type($matrix) (`,` type($mask)^)? `,` type($out) `->` type($result)
+    $vector `,` $matrix `outs` `(` $outs `)` (`,` $mask^)? `combine` `=` $combine_op `reduce` `=` $reduce_op attr-dict `:` type($vector) `,` type($matrix) `,` type($outs) (`,` type($mask)^)? `->` type($result)
+
   }];
 }
 **/

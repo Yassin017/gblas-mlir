@@ -1,0 +1,28 @@
+2. The Sparsifier Crash (unrealized_conversion_cast)
+This was the much bigger, architectural issue.
+
+The Issue: After fixing the syntax, the code made it past the initial parsing but crashed during the Sparsification phase. Your original C++ lowering code tried to apply the mask using logical control flow: it used arith.cmpf to check if the mask was greater than zero, and arith.select to choose whether to keep the computed value or throw it away.
+
+Why it failed: The MLIR Sparsifier is an algebraic pattern matcher. It knows how to compress mathematical loops, but as soon as it sees an if/else logical branch (like select) inside the innermost loop, it panics and refuses to sparsify the code. This left sparse tensors in the standard LLVM compiler, which doesn't know what a #CSR tensor is, resulting in the unrealized_conversion_cast crash.
+
+The Fix: We rewrote your C++ lowering to use Algebraic Masking. Instead of using a logical if statement to check the mask, we just mathematically multiplied your computation by the mask tensor using arith.mulf.
+
+If the mask is 0.0, it multiplies the result by 0, effectively erasing it.
+
+If the mask is 1.0, it multiplies the result by 1, keeping it.
+
+By turning logical branches into pure math, the Sparsifier perfectly understood your code, optimized the loops to only calculate existing edges, and successfully generated the native C++ executable!
+2. The Sparsifier Crash (unrealized_conversion_cast)
+This was the much bigger, architectural issue.
+
+The Issue: After fixing the syntax, the code made it past the initial parsing but crashed during the Sparsification phase. Your original C++ lowering code tried to apply the mask using logical control flow: it used arith.cmpf to check if the mask was greater than zero, and arith.select to choose whether to keep the computed value or throw it away.
+
+Why it failed: The MLIR Sparsifier is an algebraic pattern matcher. It knows how to compress mathematical loops, but as soon as it sees an if/else logical branch (like select) inside the innermost loop, it panics and refuses to sparsify the code. This left sparse tensors in the standard LLVM compiler, which doesn't know what a #CSR tensor is, resulting in the unrealized_conversion_cast crash.
+
+The Fix: We rewrote your C++ lowering to use Algebraic Masking. Instead of using a logical if statement to check the mask, we just mathematically multiplied your computation by the mask tensor using arith.mulf.
+
+If the mask is 0.0, it multiplies the result by 0, effectively erasing it.
+
+If the mask is 1.0, it multiplies the result by 1, keeping it.
+
+By turning logical branches into pure math, the Sparsifier perfectly understood your code, optimized the loops to only calculate existing edges, and successfully generated the native C++ executable!

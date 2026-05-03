@@ -1,0 +1,162 @@
+When MLIR lowers standard code to hardware memory (bufferization), an scf.for loop that updates variables expects the memory buffers to be modified in-place.
+However, sparse tensors are dynamic. When gblas.vxm multiplies your sparse vectors, it creates a completely new sparse tensor allocation in memory because it doesn't know beforehand how many non-zero elements the result will have. MLIR's bufferization pass sees that you are yielding a new memory buffer (%13) instead of the one you started the loop with (%14), and it hard-crashes.
+
+Returning newly-allocated sparse tensors from an scf.for loop is simply not supported out-of-the-box by standard MLIR bufferization
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------
+
+
+Okay, MLIR is officially playing hardball.
+
+Here is exactly what happened: The MLIR compiler is "too smart" for its own good. It has an optimization pass called canonicalize that runs before bufferization. When it saw your linalg.copy, it mathematically proved that %v_next and %v_computed contained the exact same data, so it completely deleted the linalg.copy and just yielded %v_computed directly.
+
+Because it deleted the copy, we lost our strict memory tie to %v_curr, and the bufferizer crashed with the exact same equivalence error.
+
+#CSR = #sparse_tensor.encoding<{
+  map = (d0, d1) -> (d0 : dense, d1 : compressed)
+}>
+
+module {
+    func.func @main() {
+        %c0 = arith.constant 0 : index
+        %c1 = arith.constant 1 : index
+        %c2 = arith.constant 2 : index
+        
+        %f0 = arith.constant 0.0 : f32
+        %f1 = arith.constant 1.0 : f32
+
+        %i64_0 = arith.constant 0 : i64
+        %i64_1 = arith.constant 1 : i64
+        %i64_2 = arith.constant 2 : i64
+
+        // --- 1. Graph Setup (Sparse Matrix) ---
+        %mat_indices = tensor.empty() : tensor<2x2xi64>
+        %i0 = tensor.insert %i64_0 into %mat_indices[%c0, %c0] : tensor<2x2xi64>
+        %i1 = tensor.insert %i64_1 into %i0[%c0, %c1] : tensor<2x2xi64>
+        %i2 = tensor.insert %i64_1 into %i1[%c1, %c0] : tensor<2x2xi64>
+        %i3 = tensor.insert %i64_2 into %i2[%c1, %c1] : tensor<2x2xi64>
+        
+        %mat_vals = tensor.from_elements %f1, %f1 : tensor<2xf32>
+        
+        %A = gblas.from_coo %i3, %mat_vals 
+            : tensor<2x2xi64>, tensor<2xf32> -> tensor<3x3xf32, #CSR>
+
+        %num_nodes = gblas.nrows %A : tensor<3x3xf32, #CSR> -> index
+
+        // --- 2. Initial State Allocation ---
+        %v_start_1 = tensor.from_elements %f1, %f0, %f0 : tensor<3xf32>
+        %v_start_2 = tensor.from_elements %f1, %f0, %f0 : tensor<3xf32>
+
+        // --- 3. Clean Loop ---
+        %visited_final:2 = scf.for %i = %c0 to %num_nodes step %c1 
+            iter_args(%v_curr = %v_start_1, %visited_curr = %v_start_2) 
+            -> (tensor<3xf32>, tensor<3xf32>) {
+            
+            // 1. Allocate scratch INSIDE loop. 
+            // MLIR automatically hoists this allocation outside during bufferization!
+            %scratch = tensor.empty() : tensor<3xf32>
+            %zeroed_scratch = linalg.fill ins(%f0 : f32) outs(%scratch : tensor<3xf32>) -> tensor<3xf32>
+
+            // 2. vxm writes directly into the scratch buffer
+            %v_computed = gblas.vxm %v_curr, %A outs(%zeroed_scratch), %visited_curr
+                combine = multiplies 
+                reduce = plus 
+                {mask_complement = true}
+                : tensor<3xf32>, tensor<3x3xf32, #CSR>, tensor<3xf32>, tensor<3xf32> 
+                -> tensor<3xf32>
+
+            // 3. update reads from v_computed to modify visited_curr in-place
+            %visited_next = gblas.update %v_computed -> %visited_curr 
+                {accumulate_operator = "plus"}
+                : tensor<3xf32> -> tensor<3xf32>
+
+            // 4. Force copy into the loop-carried buffer v_curr
+            %v_next = linalg.copy ins(%v_computed : tensor<3xf32>) outs(%v_curr : tensor<3xf32>) -> tensor<3xf32>
+
+            // 5. Yield exactly the 2 mapped iter_args
+            scf.yield %v_next, %visited_next : tensor<3xf32>, tensor<3xf32>
+        }
+
+        // --- 4. Print Output ---
+        %print_vec = vector.transfer_read %visited_final#1[%c0], %f0 : tensor<3xf32>, vector<3xf32>
+        vector.print %print_vec : vector<3xf32>
+
+        return
+    }
+}
+
+
+
+It is a classic case of two different parts of the compiler completely refusing to talk to each other. You are dealing with a fight between the Optimizer (which only cares about pure math) and the Bufferizer (which strictly manages physical computer memory).
+
+To understand why this broke, we have to look at how MLIR translates high-level abstract math into low-level machine code. Here is the full breakdown of exactly what happened.
+
+1. The Two Worlds of MLIR
+MLIR operates in phases, stepping down from abstract concepts to physical hardware instructions.
+
+The Tensor World (Value Semantics): At the top level, MLIR uses tensor types. Tensors are pure, abstract mathematical concepts. They are immutable, meaning they cannot be changed. If you want to modify a tensor, the compiler assumes you are mathematically creating a brand-new tensor. At this stage, the concept of "RAM" or "memory allocation" does not exist.
+
+The Memory World (Buffer Semantics): Hardware cannot execute abstract math; it needs physical memory. MLIR runs a process called Bufferization to convert abstract tensor types into physical memory blocks called memref (memory references).
+
+2. The Strict Rule of the scf.for Loop
+When the Bufferizer converts an scf.for loop into physical memory operations, it enforces one massive, unbreakable rule: The physical memory buffer you yield at the end of the loop MUST be the exact same physical memory buffer you started with at the beginning of the loop.
+
+Why? Because if you yield a new memory buffer every single time the loop iterates, the compiled program would have to dynamically allocate new RAM on every single cycle of the loop. This would cause massive memory leaks and ruin performance. The Bufferizer demands that loops reuse the exact same physical memory footprint (iter_args) over and over.
+
+3. The Collision (Where it all went wrong)
+Here is the timeline of how the compiler outsmarted itself and caused your crash:
+
+Step A: The Computation
+Inside your loop, you took the current frontier (%v_curr, let's call this Memory Block A) and multiplied it by the matrix using gblas.vxm. Matrix multiplication cannot safely overwrite its inputs while it is reading them, so the result (%v_computed) gets placed into a brand new location: Memory Block B.
+
+Step B: The Bufferizer's Expectation
+At the end of the loop, the scf.yield operation needs to return the state for the next iteration. The Bufferizer is standing there like a bouncer, demanding that you hand it back Memory Block A. But you only have %v_computed, which is Memory Block B. If you yield Block B, the Bufferizer crashes with the exact error you saw: "Yield operand #0 is not equivalent to the corresponding iter bbArg."
+
+Step C: Your Attempted Fix (The Copy)
+To satisfy the bouncer, you explicitly wrote a linalg.copy (or later, a gblas.update) to physically copy the data from Block B back into Block A, and then yielded Block A. This should have worked perfectly.
+
+Step D: The Optimizer's Betrayal
+Before the Bufferizer gets to run, MLIR runs an optimization pass called Canonicalization.
+The Optimizer operates entirely in the "Tensor World" where memory doesn't exist yet. It looks at your linalg.copy and says: "Wait a minute. %v_computed and the new copied tensor have the exact same mathematical values. Copying this is a waste of time! I am a genius! I will just delete the copy operation and directly yield %v_computed!"
+
+Step E: The Crash
+The Optimizer deleted your copy and hardcoded the loop to yield %v_computed (Block B) to save time. Then, the Bufferizer steps in, expects Memory Block A, sees Memory Block B, realizes the strict memory-reuse rule has been broken, and instantly fails the compilation.
+
+
+
+
+
+
+
+--------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+2. The Sparsifier Aborts
+When you run -pass-pipeline="builtin.module(sparsifier)", the MLIR sparse compiler analyzes this block. Its primary job is to generate loops that only visit the non-zero elements of %in_11.
+
+To do this safely, it attempts to prove a mathematical theorem: "If %in_11 is 0, does the final linalg.yield exactly equal %out?"
+
+Because your block contains arith.cmpf and arith.select evaluating a separate tensor (%in_12), the sparsifier's pattern matcher gets confused. It cannot mathematically prove that the output will remain unchanged if it skips a zero.
+
+Because it cannot prove it is safe, the sparsifier refuses to lower this operation. It leaves the linalg.generic block completely untouched in the IR.
+
+3. The "Unrealized Materialization" Crash
+This is where your specific error message happens:
+failed to legalize unresolved materialization from ('!llvm.ptr') to ('tensor<3x3xf32, #sparse_tensor.encoding...>')
+
+Here is the chain reaction:
+
+Earlier in your code, %4 = sparse_tensor.convert ... successfully creates a sparse tensor. Under the hood in the compiler, this is represented by memory pointers (!llvm.ptr).
+
+The sparsifier pass is supposed to consume %4, generate the dense loops, and remove the need for the #sparse tensor type in the generic operation.
+
+Because the sparsifier aborted (as explained above), your linalg.generic block remains in the code, still explicitly asking for tensor<3x3xf32, #sparse>.
+
+MLIR reaches the end of the conversion pipeline. It sees an unlowered linalg.generic demanding a high-level #sparse tensor type, but the underlying data has already been converted to an !llvm.ptr.
+
+MLIR doesn't know how to bridge this gap, so it throws the unrealized_conversion_cast error to tell you that a sparse tensor type got "stuck" and "remained live after conversion."

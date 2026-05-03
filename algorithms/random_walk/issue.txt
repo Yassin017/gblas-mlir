@@ -1,0 +1,27 @@
+The Issue: The MLIR Bufferization "Aliasing" Rule
+The error you hit (Yield operand #0 is not equivalent to the corresponding iter bbArg) is one of the most common hurdles when writing loops in MLIR. It happens during Bufferization—the step where MLIR converts pure, functional mathematics (Tensors) into physical memory allocations (Memrefs/Pointers).
+
+When you write an scf.for loop returning a tensor, the bufferization compiler enforces a very strict rule: The memory buffer you yield at the end of the loop must be the exact same physical memory buffer you started with. Here is why your first attempt broke that rule:
+
+Started with %v_curr: You passed the loop-carried state into the iteration.
+
+Created %scratch: You allocated a brand new, empty tensor.
+
+Computed gblas.vxm: The math results were written into %scratch.
+
+Yielded %scratch: You told the loop to use %scratch as the next iteration's %v_curr.
+
+The compiler panicked because %scratch and %v_curr are two completely different memory addresses. MLIR refuses to magically change the loop's memory pointer halfway through, because doing so implicitly in a low-level compiler could cause massive memory leaks or pointer corruption.
+
+The Fix: In-Place Memory Updates
+To fix it, we had to prove to the compiler that we were updating the existing memory, not swapping it out for new memory.
+
+We achieved this by using your "Bulletproof Loop" which utilized tensor.extract and tensor.insert. Here is exactly why that solved the problem:
+
+tensor.extract: Reads the newly computed float value out of the %scratch buffer.
+
+tensor.insert: Puts that float value into %v_acc (which is just the %v_curr buffer passed down).
+
+The Magic of tensor.insert: In the functional MLIR world, tensor.insert looks like it creates a new tensor. But during Bufferization, MLIR translates tensor.insert into a direct, in-place memory write (equivalent to v_curr[j] = val in C++).
+
+Because we modified %v_acc in-place rather than allocating a new tensor, the tensor we ultimately yielded at the end of the loop mapped to the exact same physical memory address we started with. The compiler saw that the memory addresses matched perfectly, the aliasing rule was satisfied, and it successfully lowered your code to LLVM IR!
