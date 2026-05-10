@@ -135,7 +135,7 @@ module {
         %f1 = arith.constant 1.0 : f32
         %f_neg1 = arith.constant -1.0 : f32
 
-        // 1. Load Coordinates from MemRef
+        // Load Coordinates from MemRef
         %empty_coords = tensor.empty(%num_edges) : tensor<?x2xi64>
         %coords_tensor = scf.for %e = %c0 to %num_edges step %c1 iter_args(%t_coords = %empty_coords) -> tensor<?x2xi64> {
             %row = memref.load %coords_mem[%e, %c0] : memref<?x2xi64>
@@ -145,7 +145,7 @@ module {
             scf.yield %t2 : tensor<?x2xi64>
         }
 
-        // 2. Load Values from MemRef
+        // Load Values from MemRef
         %empty_vals = tensor.empty(%num_edges) : tensor<?xf32>
         %vals_tensor = scf.for %e = %c0 to %num_edges step %c1 iter_args(%t_vals = %empty_vals) -> tensor<?xf32> {
             %v = memref.load %vals_mem[%e] : memref<?xf32>
@@ -153,11 +153,11 @@ module {
             scf.yield %t1 : tensor<?xf32>
         }
 
-        // 3. Generate #CSR using dynamic arguments!
+        // Generate #CSR using dynamic arguments
         %A = gblas.from_coo %coords_tensor, %vals_tensor (%num_nodes, %num_nodes)
             : tensor<?x2xi64>, tensor<?xf32> -> tensor<?x?xf32, #CSR>
 
-        // 4. Initial Vectors
+        // Initial Vectors
         %empty_f32 = tensor.empty(%num_nodes) : tensor<?xf32>
         
         %v_start_0 = linalg.fill ins(%f0 : f32) outs(%empty_f32 : tensor<?xf32>) -> tensor<?xf32>
@@ -171,7 +171,7 @@ module {
 
         func.call @start_timer() : () -> () //time start
 
-        // 5. BFS Loop
+        // BFS Loop
         %final_results:3 = scf.for %i = %c0 to %num_nodes step %c1 
             iter_args(%v_curr = %v_start, %visited_curr = %visited_start, %dist_curr = %dist_start) 
             -> (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) {
@@ -214,7 +214,7 @@ module {
 
         func.call @stop_timer() : () -> () //time end
 
-        // 6. Write back to C++
+        // Write back to C++
         scf.for %k = %c0 to %num_nodes step %c1 {
             %d_val = tensor.extract %final_results#2[%k] : tensor<?xf32>
             memref.store %d_val, %out_dist[%k] : memref<?xf32>
