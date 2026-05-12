@@ -13,7 +13,7 @@ module {
 
         %c0 = arith.constant 0 : index
         %c1 = arith.constant 1 : index
-        %c10 = arith.constant 10 : index 
+        %c100 = arith.constant 100 : index 
         
         %f0 = arith.constant 0.0 : f32
         %f1 = arith.constant 1.0 : f32
@@ -48,7 +48,7 @@ module {
         func.call @start_timer() : () -> () // time start
 
         // 5. The Random Walk Loop (10 Iterations)
-        %v_final = scf.for %i = %c0 to %c10 step %c1 
+        %v_final = scf.for %i = %c0 to %c100 step %c1 
             iter_args(%v_curr = %v_start) -> (tensor<?xf32>) {
             
             %scratch = tensor.empty(%num_nodes) : tensor<?xf32>

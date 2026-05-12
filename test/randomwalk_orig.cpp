@@ -41,8 +41,8 @@ extern "C" void _ss_ciface_randomwalk(int32_t nodes, int32_t edges, MemRef<int64
 
     start_timer();
 
-    // 10 Iterations
-    for(int i = 0; i < 10; i++) {
+    // 100  Iterations
+    for(int i = 0; i < 100; i++) {
         GrB_Vector_clear(v_next);
         
         // v_next = v_curr * A
@@ -59,7 +59,7 @@ extern "C" void _ss_ciface_randomwalk(int32_t nodes, int32_t edges, MemRef<int64
     GrB_Vector_nvals(&nvals, v_curr);
 
     
-
+    stop_timer();
 
     // Write final probabilities back to MLIR MemRef Out
     for(int i = 0; i < nodes; i++) out->aligned[i] = 0.0f;
@@ -73,7 +73,7 @@ extern "C" void _ss_ciface_randomwalk(int32_t nodes, int32_t edges, MemRef<int64
         }
     }
 
-    stop_timer();
+    
 
     GrB_Matrix_free(&A);
     GrB_Vector_free(&v_curr);

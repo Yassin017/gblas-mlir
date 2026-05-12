@@ -171,11 +171,84 @@ module {
 
         func.call @start_timer() : () -> () //time start
 
-        // BFS Loop
-        %final_results:3 = scf.for %i = %c0 to %num_nodes step %c1 
-            iter_args(%v_curr = %v_start, %visited_curr = %visited_start, %dist_curr = %dist_start) 
-            -> (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) {
+        // // BFS Loop
+        // %final_results:3 = scf.for %i = %c0 to %num_nodes step %c1 
+        //     iter_args(%v_curr = %v_start, %visited_curr = %visited_start, %dist_curr = %dist_start) 
+        //     -> (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) {
             
+        //     %scratch_empty = tensor.empty(%num_nodes) : tensor<?xf32>
+        //     %zeroed_scratch = linalg.fill ins(%f0 : f32) outs(%scratch_empty : tensor<?xf32>) -> tensor<?xf32>
+
+        //     %v_computed = gblas.vxm %v_curr, %A outs(%zeroed_scratch), %visited_curr
+        //         combine = multiplies reduce = plus {mask_complement = true}
+        //         : tensor<?xf32>, tensor<?x?xf32, #CSR>, tensor<?xf32>, tensor<?xf32> 
+        //         -> tensor<?xf32>
+
+        //     %i_i32 = arith.index_cast %i : index to i32
+        //     %i_f32 = arith.sitofp %i_i32 : i32 to f32
+        //     %d_f32 = arith.addf %i_f32, %f1 : f32
+
+        //     %v_next, %visited_next, %dist_next = scf.for %j = %c0 to %num_nodes step %c1 
+        //         iter_args(%v_acc = %v_curr, %vis_acc = %visited_curr, %d_acc = %dist_curr) 
+        //         -> (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>) {
+                
+        //         %val = tensor.extract %v_computed[%j] : tensor<?xf32>
+        //         %is_active = arith.cmpf ogt, %val, %f0 : f32
+                
+        //         %new_dist, %new_vis = scf.if %is_active -> (f32, f32) {
+        //             scf.yield %d_f32, %f1 : f32, f32
+        //         } else {
+        //             %old_dist = tensor.extract %d_acc[%j] : tensor<?xf32>
+        //             %old_vis = tensor.extract %vis_acc[%j] : tensor<?xf32>
+        //             scf.yield %old_dist, %old_vis : f32, f32
+        //         }
+                
+        //         %v_inserted = tensor.insert %val into %v_acc[%j] : tensor<?xf32>
+        //         %vis_inserted = tensor.insert %new_vis into %vis_acc[%j] : tensor<?xf32>
+        //         %dist_inserted = tensor.insert %new_dist into %d_acc[%j] : tensor<?xf32>
+                
+        //         scf.yield %v_inserted, %vis_inserted, %dist_inserted : tensor<?xf32>, tensor<?xf32>, tensor<?xf32>
+        //     }
+        //     scf.yield %v_next, %visited_next, %dist_next : tensor<?xf32>, tensor<?xf32>, tensor<?xf32>
+        // }
+
+        // func.call @stop_timer() : () -> () //time end
+
+        // // Write back to C++
+        // scf.for %k = %c0 to %num_nodes step %c1 {
+        //     %d_val = tensor.extract %final_results#2[%k] : tensor<?xf32>
+        //     memref.store %d_val, %out_dist[%k] : memref<?xf32>
+        // }
+
+
+        // 5. BFS Loop (scf.while with early exit)
+        %final_results:4 = scf.while (%v_curr = %v_start, %visited_curr = %visited_start, %dist_curr = %dist_start, %i = %c0) 
+            : (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>, index) -> (tensor<?xf32>, tensor<?xf32>, tensor<?xf32>, index) {
+            
+            // --- CONDITION BLOCK: Check if frontier is empty ---
+            %scratch_scalar = tensor.empty() : tensor<f32>
+            %filled_scalar = linalg.fill ins(%f0 : f32) outs(%scratch_scalar : tensor<f32>) -> tensor<f32>
+            
+            // Reduce sum over the frontier vector (Maps strictly inlined here)
+            %sum = linalg.generic {
+                indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>],
+                iterator_types = ["reduction"]
+            } ins(%v_curr : tensor<?xf32>) outs(%filled_scalar : tensor<f32>) {
+            ^bb0(%in: f32, %out: f32):
+                %add = arith.addf %in, %out : f32
+                linalg.yield %add : f32
+            } -> tensor<f32>
+            
+            %sum_val = tensor.extract %sum[] : tensor<f32>
+            %is_active = arith.cmpf ogt, %sum_val, %f0 : f32
+            
+            // Yield condition to proceed or exit
+            scf.condition(%is_active) %v_curr, %visited_curr, %dist_curr, %i : tensor<?xf32>, tensor<?xf32>, tensor<?xf32>, index
+
+        } do {
+        ^bb0(%v_curr: tensor<?xf32>, %visited_curr: tensor<?xf32>, %dist_curr: tensor<?xf32>, %i: index):
+            
+            // --- BODY BLOCK: Perform SpMV and Element-wise Updates ---
             %scratch_empty = tensor.empty(%num_nodes) : tensor<?xf32>
             %zeroed_scratch = linalg.fill ins(%f0 : f32) outs(%scratch_empty : tensor<?xf32>) -> tensor<?xf32>
 
@@ -209,12 +282,14 @@ module {
                 
                 scf.yield %v_inserted, %vis_inserted, %dist_inserted : tensor<?xf32>, tensor<?xf32>, tensor<?xf32>
             }
-            scf.yield %v_next, %visited_next, %dist_next : tensor<?xf32>, tensor<?xf32>, tensor<?xf32>
+            
+            %i_next = arith.addi %i, %c1 : index
+            scf.yield %v_next, %visited_next, %dist_next, %i_next : tensor<?xf32>, tensor<?xf32>, tensor<?xf32>, index
         }
 
         func.call @stop_timer() : () -> () //time end
 
-        // Write back to C++
+        // 6. Write back to C++ (Note: we extract from #2 instead of #2 because index is now #3)
         scf.for %k = %c0 to %num_nodes step %c1 {
             %d_val = tensor.extract %final_results#2[%k] : tensor<?xf32>
             memref.store %d_val, %out_dist[%k] : memref<?xf32>
